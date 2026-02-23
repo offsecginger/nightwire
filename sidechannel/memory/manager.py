@@ -50,7 +50,13 @@ class MemoryManager:
         """Initialize the memory system."""
         if self._initialized:
             return
+        async with self._init_lock:
+            if self._initialized:
+                return
+            await self._initialize_unlocked()
 
+    async def _initialize_unlocked(self) -> None:
+        """Internal initialization (caller must hold _init_lock)."""
         self._db = await initialize_database(self.db_path)
 
         # Initialize embeddings if enabled
@@ -71,7 +77,7 @@ class MemoryManager:
             return
         async with self._init_lock:
             if not self._initialized:
-                await self.initialize()
+                await self._initialize_unlocked()
 
     @property
     def db(self) -> DatabaseConnection:

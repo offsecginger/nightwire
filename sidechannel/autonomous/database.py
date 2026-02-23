@@ -766,29 +766,47 @@ class AutonomousDatabase:
             else None
         )
 
-        cursor.execute(
-            """
-            UPDATE tasks
-            SET status = ?,
-                started_at = COALESCE(?, started_at),
-                completed_at = COALESCE(?, completed_at),
-                error_message = COALESCE(?, error_message),
-                claude_output = COALESCE(?, claude_output),
-                files_changed = COALESCE(?, files_changed),
-                quality_gate_results = COALESCE(?, quality_gate_results)
-            WHERE id = ?
-        """,
-            (
-                status.value,
-                self._format_timestamp(started_at),
-                self._format_timestamp(completed_at),
-                error_message,
-                claude_output,
-                files_json,
-                qg_json,
-                task_id,
-            ),
-        )
+        # When requeueing for retry, clear execution-specific fields so stale
+        # data from the previous attempt doesn't persist via COALESCE.
+        if status == TaskStatus.QUEUED:
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET status = ?,
+                    started_at = NULL,
+                    completed_at = NULL,
+                    error_message = ?,
+                    claude_output = NULL,
+                    files_changed = NULL,
+                    quality_gate_results = NULL
+                WHERE id = ?
+            """,
+                (status.value, error_message, task_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET status = ?,
+                    started_at = COALESCE(?, started_at),
+                    completed_at = COALESCE(?, completed_at),
+                    error_message = COALESCE(?, error_message),
+                    claude_output = COALESCE(?, claude_output),
+                    files_changed = COALESCE(?, files_changed),
+                    quality_gate_results = COALESCE(?, quality_gate_results)
+                WHERE id = ?
+            """,
+                (
+                    status.value,
+                    self._format_timestamp(started_at),
+                    self._format_timestamp(completed_at),
+                    error_message,
+                    claude_output,
+                    files_json,
+                    qg_json,
+                    task_id,
+                ),
+            )
         self._conn.commit()
 
     async def store_verification_result(

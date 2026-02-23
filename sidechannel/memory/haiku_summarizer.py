@@ -122,6 +122,7 @@ If nothing is relevant, say "No relevant past context found."
             "-p", prompt
         ]
 
+        process = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,

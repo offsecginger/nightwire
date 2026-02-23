@@ -139,7 +139,14 @@ Response Style:
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    response = data["choices"][0]["message"]["content"]
+                    choices = data.get("choices")
+                    if not choices or not isinstance(choices, list):
+                        logger.error("sidechannel_malformed_response", data_keys=list(data.keys()))
+                        return False, "Received an unexpected response from the AI provider. Please try again."
+                    response = choices[0].get("message", {}).get("content", "")
+                    if not response:
+                        logger.warning("sidechannel_empty_response")
+                        return False, "The AI provider returned an empty response. Please try again."
                     logger.info("sidechannel_response_success", length=len(response))
 
                     # Truncate if too long for Signal
