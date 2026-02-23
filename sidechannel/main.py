@@ -45,7 +45,11 @@ async def main():
     logger.info("sidechannel_starting", version="1.0.0")
 
     # Import here to ensure logging is configured first
+    from .config import get_config
     from .bot import SignalBot
+
+    config = get_config()
+    config.validate()
 
     bot = SignalBot()
 

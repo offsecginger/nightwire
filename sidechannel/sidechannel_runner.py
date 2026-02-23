@@ -2,6 +2,7 @@
 
 import asyncio
 from typing import Optional, Tuple
+from urllib.parse import urlparse
 
 import aiohttp
 import structlog
@@ -10,6 +11,9 @@ logger = structlog.get_logger()
 
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+
+ALLOWED_API_HOSTS = {"api.openai.com", "api.x.ai"}
+
 
 class SidechannelRunner:
     """Manages API execution for sidechannel AI assistant.
@@ -30,6 +34,15 @@ class SidechannelRunner:
         self.model = model
         self.max_tokens = max_tokens
         self._session: Optional[aiohttp.ClientSession] = None
+
+        # Validate API URL domain and scheme
+        parsed = urlparse(self.api_url)
+        if parsed.hostname not in ALLOWED_API_HOSTS:
+            logger.warning("untrusted_api_url", url=self.api_url, host=parsed.hostname)
+            raise ValueError(f"Untrusted API URL: {parsed.hostname}. Allowed: {', '.join(ALLOWED_API_HOSTS)}")
+        if parsed.scheme != "https":
+            logger.warning("insecure_api_url", url=self.api_url)
+            raise ValueError("API URL must use HTTPS")
 
         if not self.api_key:
             logger.warning("sidechannel_api_key_not_found")

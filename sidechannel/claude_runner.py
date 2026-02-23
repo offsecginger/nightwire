@@ -1,6 +1,7 @@
 """Claude CLI runner for sidechannel."""
 
 import asyncio
+import os
 from enum import Enum
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Awaitable
@@ -234,12 +235,21 @@ class ClaudeRunner:
                         logger.warning("progress_callback_error", error=str(e))
 
         try:
+            # Minimal environment — only what Claude CLI needs
+            _subprocess_env = {
+                "HOME": os.environ.get("HOME", ""),
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "USER": os.environ.get("USER", ""),
+                "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+                "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
+            }
+
             self._running_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(self.current_project),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=None
+                env=_subprocess_env
             )
 
             if progress_callback:

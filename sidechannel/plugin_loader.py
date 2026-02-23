@@ -2,6 +2,7 @@
 
 import importlib
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional
@@ -134,8 +135,22 @@ class PluginLoader:
         plugin = plugin_cls(ctx)
         self.plugins.append(plugin)
 
-        # Collect commands (warn on conflicts)
+        # Collect commands (with validation)
+        BUILTIN_COMMANDS = frozenset({
+            "help", "projects", "select", "add", "new", "ask", "do",
+            "complex", "cancel", "summary", "remember", "recall",
+            "history", "forget", "memories", "preferences", "global",
+            "prd", "story", "task", "tasks", "autonomous", "queue",
+            "learnings", "status",
+        })
+
         for cmd_name, handler in plugin.commands().items():
+            if not re.match(r'^[a-z][a-z0-9_-]*$', cmd_name):
+                logger.warning("plugin_invalid_command_name", command=cmd_name, plugin=plugin_name)
+                continue
+            if cmd_name in BUILTIN_COMMANDS:
+                logger.warning("plugin_builtin_override_blocked", command=cmd_name, plugin=plugin_name)
+                continue
             if cmd_name in self._commands:
                 logger.warning(
                     "plugin_command_conflict",

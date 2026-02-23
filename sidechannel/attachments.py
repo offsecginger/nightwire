@@ -1,5 +1,6 @@
 """Attachment handling for Signal bot - download, validate, and save image attachments."""
 
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,8 @@ import structlog
 logger = structlog.get_logger()
 
 # Supported image MIME types for Claude vision
+MAX_ATTACHMENT_SIZE = 50_000_000  # 50MB
+
 SUPPORTED_IMAGE_TYPES: Dict[str, str] = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -34,16 +37,25 @@ async def download_attachment(
     Returns:
         Attachment bytes or None if download fails
     """
+    # Validate attachment_id to prevent SSRF
+    if not re.match(r'^[a-zA-Z0-9_=-]+$', str(attachment_id)):
+        logger.warning("invalid_attachment_id", attachment_id=str(attachment_id)[:20])
+        return None
+
     try:
         url = f"{signal_api_url}/v1/attachments/{attachment_id}"
         async with session.get(url) as resp:
             if resp.status == 200:
-                # Check content length before downloading
-                content_length = resp.content_length
-                if isinstance(content_length, int) and content_length > 50_000_000:  # 50MB limit
-                    logger.warning("attachment_too_large", size=content_length, attachment_id=attachment_id)
-                    return None
-                data = await resp.read()
+                # Stream response in chunks to enforce size limit regardless of headers
+                chunks = []
+                total = 0
+                async for chunk in resp.content.iter_chunked(8192):
+                    total += len(chunk)
+                    if total > MAX_ATTACHMENT_SIZE:
+                        logger.warning("attachment_too_large_streaming", attachment_id=attachment_id)
+                        return None
+                    chunks.append(chunk)
+                data = b"".join(chunks)
                 logger.info("attachment_downloaded", id=attachment_id, size=len(data))
                 return data
             else:
@@ -80,7 +92,10 @@ def save_attachment(
     unique_id = uuid.uuid4().hex[:8]
     filename = f"{timestamp}_{unique_id}{ext}"
 
-    user_dir = attachments_dir / sender.replace("+", "")
+    safe_sender = re.sub(r'[^\d]', '', sender)
+    if not safe_sender:
+        safe_sender = "unknown"
+    user_dir = attachments_dir / safe_sender
     user_dir.mkdir(parents=True, exist_ok=True)
 
     file_path = user_dir / filename

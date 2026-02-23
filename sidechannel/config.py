@@ -5,8 +5,11 @@ import shutil
 from pathlib import Path
 from typing import List, Optional
 
+import structlog
 import yaml
 from dotenv import load_dotenv
+
+logger = structlog.get_logger()
 
 
 class Config:
@@ -43,7 +46,32 @@ class Config:
     @property
     def allowed_numbers(self) -> List[str]:
         """Get list of allowed phone numbers."""
-        return self.settings.get("allowed_numbers", [])
+        numbers = self.settings.get("allowed_numbers", [])
+        if not isinstance(numbers, list):
+            logger.error("allowed_numbers_invalid_type", type=type(numbers).__name__)
+            return []
+        return numbers
+
+    def validate(self):
+        """Validate critical settings at startup. Call from main.py."""
+        numbers = self.allowed_numbers
+        if not numbers:
+            logger.warning("no_allowed_numbers", msg="Bot will reject all messages")
+        for n in numbers:
+            if not isinstance(n, str) or not n.startswith("+") or not n[1:].isdigit():
+                logger.error("invalid_phone_number_format", number="..." + str(n)[-4:])
+
+        # Check claude config is a dict
+        claude_config = self.settings.get("claude", {})
+        if not isinstance(claude_config, dict):
+            logger.error("config_invalid_type", key="claude", expected="dict")
+
+        # Check autonomous config types
+        auto_config = self.settings.get("autonomous", {})
+        if isinstance(auto_config, dict):
+            mp = auto_config.get("max_parallel")
+            if mp is not None and (not isinstance(mp, int) or mp < 1 or mp > 10):
+                logger.error("config_invalid_value", key="autonomous.max_parallel", value=mp, valid="1-10")
 
     @property
     def signal_api_url(self) -> str:

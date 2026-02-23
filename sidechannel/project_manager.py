@@ -1,6 +1,7 @@
 """Project management for Signal Claude Bot."""
 
 import os
+import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -121,9 +122,9 @@ class ProjectManager:
 
     def create_project(self, name: str, description: str = "") -> Tuple[bool, str]:
         """Create a new project directory and select it."""
-        # Validate name (no path separators, etc.)
-        if "/" in name or "\\" in name or ".." in name:
-            return False, "Invalid project name. Use simple names without paths."
+        # Validate name with positive allowlist
+        if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$', name) or len(name) > 64:
+            return False, "Invalid project name. Use alphanumeric characters, dots, hyphens, or underscores (max 64 chars)."
 
         # Create path under projects base
         project_path = self.config.projects_base_path / name
@@ -181,7 +182,7 @@ class ProjectManager:
             try:
                 file_count = sum(1 for _ in self.current_path.rglob("*") if _.is_file())
                 status.append(f"Files: ~{file_count}")
-            except:
+            except Exception:
                 pass
 
         return "\n".join(status)

@@ -28,7 +28,12 @@ logger = structlog.get_logger()
 
 
 class AutonomousDatabase:
-    """Database operations for autonomous task management."""
+    """Database operations for autonomous task management.
+
+    Note: Task/PRD/Story access is not scoped by phone number.
+    All authorized users share the same workspace — this is by design.
+    Authorization is enforced at the Signal message entry point (security.py).
+    """
 
     def __init__(self, conn: sqlite3.Connection):
         """Initialize with existing database connection from memory system."""

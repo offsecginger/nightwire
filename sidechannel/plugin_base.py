@@ -57,15 +57,15 @@ class PluginContext:
     ):
         self.plugin_name = plugin_name
         self._send_message = send_message
-        self._settings = settings
-        self.allowed_numbers = allowed_numbers
+        # Only expose the plugin's own config section, not full settings
+        self._plugin_settings = settings.get("plugins", {}).get(plugin_name, {})
+        self.allowed_numbers = list(allowed_numbers)  # Read-only copy
         self.data_dir = data_dir
         self.logger = structlog.get_logger(plugin=plugin_name)
 
     def get_config(self, key: str, default: Any = None) -> Any:
         """Read a value from plugins.<plugin_name>.<key> in settings.yaml."""
-        plugin_config = self._settings.get("plugins", {}).get(self.plugin_name, {})
-        return plugin_config.get(key, default)
+        return self._plugin_settings.get(key, default)
 
     def get_env(self, key: str) -> Optional[str]:
         """Read an environment variable."""
@@ -74,8 +74,7 @@ class PluginContext:
     @property
     def enabled(self) -> bool:
         """Whether this plugin is enabled in config (default True)."""
-        plugin_config = self._settings.get("plugins", {}).get(self.plugin_name, {})
-        return plugin_config.get("enabled", True)
+        return self._plugin_settings.get("enabled", True)
 
     async def send_message(self, recipient: str, message: str) -> None:
         """Send a Signal message to a recipient."""

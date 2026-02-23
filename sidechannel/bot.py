@@ -1,16 +1,20 @@
 """Signal bot implementation for sidechannel."""
 
 import asyncio
+import hashlib
 import json
+import time as _time
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import aiohttp
 import structlog
 
 from .config import get_config
-from .security import is_authorized, sanitize_input
+from .security import is_authorized, sanitize_input, check_rate_limit
 from .claude_runner import get_runner
 from .project_manager import get_project_manager
 from .memory import MemoryManager, MemoryCommands
@@ -51,7 +55,7 @@ class SignalBot:
         self.session: Optional[aiohttp.ClientSession] = None
         self.running = False
         self.account: Optional[str] = None
-        self._processed_messages: set = set()  # Dedup: (timestamp, message_hash)
+        self._processed_messages = OrderedDict()  # Dedup: msg_hash -> timestamp
 
         # Task state tracking - prevents blocking and allows cancellation
         self._current_task: Optional[asyncio.Task] = None
@@ -90,6 +94,12 @@ class SignalBot:
         self.session = aiohttp.ClientSession()
         self.running = True
 
+        # Warn if non-localhost Signal API is not using HTTPS
+        parsed = urlparse(self.config.signal_api_url)
+        if parsed.hostname not in ("127.0.0.1", "localhost", "::1") and parsed.scheme != "https":
+            logger.warning("insecure_signal_api_url", url=self.config.signal_api_url,
+                           msg="Non-localhost Signal API should use HTTPS")
+
         # Get the registered account
         await self._get_account()
 
@@ -121,6 +131,8 @@ class SignalBot:
 
     async def stop(self):
         """Stop the bot."""
+        if not self.running:
+            return
         self.running = False
         # Stop plugins
         await self.plugin_loader.stop_all()
@@ -159,7 +171,7 @@ class SignalBot:
 
         # SECURITY: Double-check recipient is authorized before sending
         if not is_authorized(recipient):
-            logger.warning("blocked_send_to_unauthorized", recipient=recipient[:6] + "...")
+            logger.warning("blocked_send_to_unauthorized", recipient="..." + recipient[-4:])
             return
 
         # Add sidechannel identifier to all messages
@@ -175,7 +187,7 @@ class SignalBot:
 
             async with self.session.post(url, json=payload) as resp:
                 if resp.status == 201:
-                    logger.info("message_sent", recipient=recipient[:6] + "...")
+                    logger.info("message_sent", recipient="..." + recipient[-4:])
                 else:
                     text = await resp.text()
                     logger.error("send_failed", status=resp.status, response=text)
@@ -539,8 +551,8 @@ sidechannel (AI Assistant):
                 await self._send_message(sender, "Task cancelled.")
                 logger.info("background_task_cancelled", task=task_description[:50])
             except Exception as e:
-                logger.error("background_task_error", error=str(e))
-                await self._send_message(sender, f"Task failed: {str(e)}")
+                logger.error("background_task_error", error=str(e), exc_type=type(e).__name__)
+                await self._send_message(sender, "Task failed due to an internal error.")
             finally:
                 # Clear task state
                 self._current_task = None
@@ -613,8 +625,8 @@ sidechannel (AI Assistant):
                 await self._send_message(sender, "PRD creation cancelled.")
                 logger.info("prd_creation_cancelled")
             except Exception as e:
-                logger.error("prd_creation_error", error=str(e))
-                await self._send_message(sender, f"PRD creation failed: {str(e)}")
+                logger.error("prd_creation_error", error=str(e), exc_type=type(e).__name__)
+                await self._send_message(sender, "PRD creation failed. Check logs for details.")
             finally:
                 self._current_task = None
                 self._current_task_description = None
@@ -697,7 +709,8 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
             )
 
             if not success:
-                return f"Failed to analyze task: {response[:200]}"
+                logger.error("prd_analyze_failed", response=response[:200])
+                return "Failed to analyze task."
 
             await update_step("Step 3/5: Parsing task breakdown...")
 
@@ -763,14 +776,14 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
             )
 
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error("prd_json_parse_error", error=str(e))
-            return f"Failed to parse task breakdown: {str(e)[:300]}"
+            logger.error("prd_json_parse_error", error=str(e), exc_type=type(e).__name__)
+            return "Failed to parse task breakdown."
         except KeyError as e:
             logger.error("prd_missing_field", error=str(e))
-            return f"PRD response missing required field: {str(e)}"
+            return "PRD response missing a required field."
         except Exception as e:
-            logger.error("prd_creation_error", error=str(e))
-            return f"Failed to create PRD: {str(e)[:300]}"
+            logger.error("prd_creation_error", error=str(e), exc_type=type(e).__name__)
+            return "Failed to create PRD. Check logs for details."
 
     async def _process_message(self, sender: str, message: str):
         """Process an incoming message."""
@@ -778,6 +791,12 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
         if not is_authorized(sender):
             logger.warning("unauthorized_message", sender=sender)
             return  # Silently ignore unauthorized messages
+
+        # Check rate limit
+        if not check_rate_limit(sender):
+            logger.warning("rate_limited", sender="..." + sender[-4:])
+            await self._send_message(sender, "Rate limited. Please wait before sending more messages.")
+            return
 
         # Sanitize input
         message = sanitize_input(message.strip())
@@ -787,7 +806,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
 
         logger.info(
             "message_received",
-            sender=sender[:6] + "...",
+            sender="..." + sender[-4:],
             length=len(message)
         )
 
@@ -900,11 +919,15 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
         ws_base = self.config.signal_api_url.replace("http://", "ws://").replace("https://", "wss://")
         ws_url = f"{ws_base}/v1/receive/{self.account}"
 
+        reconnect_delay = 5
+        MAX_RECONNECT_DELAY = 300
+
         while self.running:
             try:
                 logger.info("websocket_connecting", url=ws_url)
                 async with self.session.ws_connect(ws_url, heartbeat=30) as ws:
                     logger.info("websocket_connected")
+                    reconnect_delay = 5  # Reset on successful connection
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             try:
@@ -923,7 +946,8 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 break
             except Exception as e:
                 logger.error("websocket_exception", error=str(e))
-                await asyncio.sleep(5)
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, MAX_RECONNECT_DELAY)
 
     async def _handle_signal_message(self, msg: dict):
         """Handle a message from Signal API."""
@@ -964,17 +988,22 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
 
             # Deduplication: Signal sends both dataMessage and syncMessage for self-messages
             timestamp = envelope.get("timestamp", 0)
-            msg_hash = hash((timestamp, message_text.strip()))
+            msg_hash = hashlib.sha256(f"{timestamp}:{message_text.strip()}".encode()).hexdigest()
             if msg_hash in self._processed_messages:
                 logger.debug("duplicate_message_skipped", timestamp=timestamp)
                 return
-            self._processed_messages.add(msg_hash)
+            self._processed_messages[msg_hash] = _time.time()
 
-            # Keep dedup set small (only recent messages)
-            if len(self._processed_messages) > 100:
-                self._processed_messages.clear()
+            # Evict entries older than 60 seconds
+            cutoff = _time.time() - 60
+            while self._processed_messages:
+                oldest_key, oldest_time = next(iter(self._processed_messages.items()))
+                if oldest_time < cutoff:
+                    self._processed_messages.pop(oldest_key)
+                else:
+                    break
 
-            logger.info("processing_message", source=source[:6] + "...", length=len(message_text))
+            logger.info("processing_message", source="..." + source[-4:], length=len(message_text))
             await self._process_message(source, message_text)
 
         except Exception as e:

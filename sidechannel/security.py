@@ -46,7 +46,7 @@ def check_rate_limit(phone_number: str) -> bool:
     if len(_rate_limit_data[phone_number]) >= RATE_LIMIT_MAX_REQUESTS:
         logger.warning(
             "rate_limit_exceeded",
-            phone_number=phone_number[:6] + "...",
+            phone_number="..." + phone_number[-4:],
             requests_in_window=len(_rate_limit_data[phone_number])
         )
         return False
@@ -75,7 +75,7 @@ def is_authorized(phone_number: str) -> bool:
     if not authorized:
         logger.warning(
             "unauthorized_access_attempt",
-            phone_number=normalized[:6] + "...",
+            phone_number="..." + normalized[-4:],
         )
 
     return authorized
@@ -123,14 +123,17 @@ def validate_project_path(path: str) -> Optional[Path]:
 
 
 def sanitize_input(text: str) -> str:
-    """
-    Sanitize user input to prevent injection attacks.
-    This is a basic sanitization - Claude CLI handles its own escaping.
-    """
-    text = text.replace("\x00", "")
-
+    """Sanitize user input — strip control characters and enforce length limit."""
+    import unicodedata
+    # Remove all control characters except newline, tab, carriage return
+    text = ''.join(
+        ch for ch in text
+        if ch in ('\n', '\r', '\t') or not unicodedata.category(ch).startswith('C')
+    )
+    # Remove Unicode bidi override characters
+    _BIDI_CHARS = set('\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+    text = ''.join(ch for ch in text if ch not in _BIDI_CHARS)
     max_length = 10000
     if len(text) > max_length:
         text = text[:max_length]
-
     return text
