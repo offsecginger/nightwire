@@ -15,7 +15,7 @@ Most AI coding tools require you to sit at your computer. sidechannel lets you m
 - **Delegate complex projects** - Describe what you want built, and sidechannel breaks it into a full PRD with stories and tasks, then executes them autonomously with parallel workers
 - **Never lose context** - Episodic memory with vector embeddings means sidechannel remembers your conversations, project preferences, and past decisions across sessions
 - **Trust the output** - Every autonomous task is independently verified by a separate Claude context using a fail-closed security model. Code that introduces security issues or logic errors is rejected automatically
-- **Use your preferred AI provider** - Built-in support for both OpenAI and Grok as quick-response assistants, auto-detected from your API keys
+- **Powered by Claude** - All code analysis, generation, and autonomous tasks run through Claude (via Claude CLI). Optionally add OpenAI or Grok as lightweight quick-response assistants for general questions that don't need project access
 - **Stay secure** - Phone number allowlist, end-to-end encryption via Signal, rate limiting, path validation hardening, and no message content logging
 
 ### Key Benefits
@@ -289,7 +289,7 @@ The memory system gives sidechannel persistent context across sessions. Conversa
 
 ### sidechannel AI Assistant (Optional)
 
-When enabled with an OpenAI or Grok API key, you can ask quick questions directly without selecting a project. This is powered by GPT-4o or Grok and is ideal for general knowledge questions, quick advice, or anything that doesn't require project file access.
+All code commands (`/ask`, `/do`, `/complex`) are powered by **Claude** via Claude CLI. Separately, you can enable a lightweight quick-response assistant backed by OpenAI (GPT-4o) or Grok for general knowledge questions that don't need project file access. This is optional — Claude handles all the real work.
 
 **How to use:**
 

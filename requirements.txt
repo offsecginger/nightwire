@@ -10,5 +10,5 @@ pydantic>=2.0.0
 # Memory system (embeddings)
 sentence-transformers>=2.2.0
 
-# Optional: Vector search in SQLite (faster semantic search)
-# sqlite-vec>=0.1.1
+# Vector search in SQLite (semantic search)
+sqlite-vec>=0.1.1
