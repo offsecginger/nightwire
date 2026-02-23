@@ -1,0 +1,52 @@
+# sidechannel configuration
+# Copy to settings.yaml and customize
+
+# Phone numbers authorized to use the bot (E.164 format)
+# IMPORTANT: Replace with your actual phone number
+allowed_numbers:
+  - "+1XXXXXXXXXX"
+
+# Signal CLI REST API connection
+signal_api_url: "http://127.0.0.1:8080"
+
+# Claude CLI settings
+claude:
+  timeout: 600           # Max seconds per Claude invocation
+  max_turns: 15          # Max conversation turns per invocation
+  # path: "/usr/local/bin/claude"  # Override Claude CLI path
+
+# Memory System
+memory:
+  session_timeout: 30          # Minutes before session expires
+  max_context_tokens: 1500     # Max tokens for memory context injection
+
+# Autonomous Task System
+autonomous:
+  enabled: true
+  poll_interval: 30            # Seconds between task queue polls
+  quality_gates: true          # Run tests/typecheck after each task
+  max_parallel: 3              # Max concurrent task workers (1-10)
+  verification: true           # Independent code review of task output
+  # effort_levels:             # Override effort per task type
+  #   implementation: "high"
+  #   bug_fix: "high"
+  #   refactor: "medium"
+  #   testing: "medium"
+  #   prd_breakdown: "max"
+  #   verification: "low"
+
+# Rate Limiting
+# rate_limit:
+#   window: 60               # Time window in seconds
+#   max_requests: 30         # Max requests per window per user
+
+# Optional: Grok AI (nova assistant)
+grok:
+  enabled: false
+  # model: "grok-2-latest"
+  # max_tokens: 1024
+
+# Project directories
+# projects_base_path: "/home/user/projects"
+# allowed_paths:
+#   - "/home/user/projects"

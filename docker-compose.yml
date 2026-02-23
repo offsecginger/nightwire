@@ -1,0 +1,18 @@
+# Signal CLI REST API service
+# Used by sidechannel to send/receive Signal messages
+#
+# Usage:
+#   docker compose up -d
+#   # Then scan QR code at http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel
+
+services:
+  signal-api:
+    image: bbernhard/signal-cli-rest-api:0.80
+    container_name: signal-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./signal-data:/home/.local/share/signal-cli
+    environment:
+      - MODE=json-rpc

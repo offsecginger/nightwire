@@ -1,0 +1,136 @@
+"""Security module for sidechannel."""
+
+import re
+import time
+import structlog
+from collections import defaultdict
+from pathlib import Path
+from typing import Optional
+
+from .config import get_config
+
+logger = structlog.get_logger()
+
+# Simple in-memory rate limiter
+_rate_limit_data: dict = defaultdict(list)
+_rate_limit_last_cleanup: float = 0.0
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX_REQUESTS = 30  # max requests per window
+_RATE_LIMIT_CLEANUP_INTERVAL = 300  # Prune stale entries every 5 minutes
+
+
+def check_rate_limit(phone_number: str) -> bool:
+    """Check if a phone number is within rate limits.
+
+    Returns True if within limits, False if rate limited.
+    """
+    global _rate_limit_last_cleanup
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW
+
+    # Clean old entries and get recent requests
+    _rate_limit_data[phone_number] = [
+        ts for ts in _rate_limit_data[phone_number] if ts > window_start
+    ]
+
+    # Periodically prune phone numbers with no recent activity to prevent memory leak
+    if now - _rate_limit_last_cleanup > _RATE_LIMIT_CLEANUP_INTERVAL:
+        _rate_limit_last_cleanup = now
+        stale_keys = [
+            key for key, timestamps in _rate_limit_data.items()
+            if not timestamps or timestamps[-1] < window_start
+        ]
+        for key in stale_keys:
+            del _rate_limit_data[key]
+
+    if len(_rate_limit_data[phone_number]) >= RATE_LIMIT_MAX_REQUESTS:
+        logger.warning(
+            "rate_limit_exceeded",
+            phone_number=phone_number[:6] + "...",
+            requests_in_window=len(_rate_limit_data[phone_number])
+        )
+        return False
+
+    # Record this request
+    _rate_limit_data[phone_number].append(now)
+    return True
+
+
+def normalize_phone_number(phone: str) -> str:
+    """Normalize a phone number to E.164 format."""
+    if phone.startswith("+"):
+        return "+" + re.sub(r"[^\d]", "", phone[1:])
+    return "+" + re.sub(r"[^\d]", "", phone)
+
+
+def is_authorized(phone_number: str) -> bool:
+    """Check if a phone number is authorized to use the bot."""
+    config = get_config()
+    normalized = normalize_phone_number(phone_number)
+
+    allowed = [normalize_phone_number(n) for n in config.allowed_numbers]
+
+    authorized = normalized in allowed
+
+    if not authorized:
+        logger.warning(
+            "unauthorized_access_attempt",
+            phone_number=normalized[:6] + "...",
+        )
+
+    return authorized
+
+
+def validate_project_path(path: str) -> Optional[Path]:
+    """
+    Validate that a project path is within the allowed directories.
+    Returns the resolved path if valid, None otherwise.
+    """
+    config = get_config()
+    base_path = config.projects_base_path.resolve()
+
+    try:
+        resolved = Path(path).resolve()
+
+        if base_path in resolved.parents or resolved == base_path:
+            return resolved
+
+        # Append "/" to prevent prefix attacks (e.g. /home/projects matching /home/projects-evil)
+        base_str = str(base_path) + "/"
+        if str(resolved).startswith(base_str):
+            return resolved
+
+        for allowed_path in config.allowed_paths:
+            allowed_resolved = allowed_path.resolve()
+            if allowed_resolved in resolved.parents or resolved == allowed_resolved:
+                return resolved
+            allowed_str = str(allowed_resolved) + "/"
+            if str(resolved).startswith(allowed_str):
+                return resolved
+
+        logger.warning(
+            "path_validation_failed",
+            requested_path=str(path),
+            resolved_path=str(resolved),
+            base_path=str(base_path),
+            allowed_paths=[str(p) for p in config.allowed_paths]
+        )
+        return None
+
+    except Exception as e:
+        logger.error("path_validation_error", path=path, error=str(e))
+        return None
+
+
+def sanitize_input(text: str) -> str:
+    """
+    Sanitize user input to prevent injection attacks.
+    This is a basic sanitization - Claude CLI handles its own escaping.
+    """
+    text = text.replace("\x00", "")
+
+    max_length = 10000
+    if len(text) > max_length:
+        text = text[:max_length]
+
+    return text

@@ -1,0 +1,9 @@
+# sidechannel Projects Registry
+# Copy this file to projects.yaml
+# Projects can also be added via /add command
+
+projects: []
+  # Example:
+  # - name: myproject
+  #   path: /home/user/projects/myproject
+  #   description: "My awesome project"

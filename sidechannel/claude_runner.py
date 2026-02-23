@@ -1,0 +1,342 @@
+"""Claude CLI runner for sidechannel."""
+
+import asyncio
+from enum import Enum
+from pathlib import Path
+from typing import Callable, List, Optional, Tuple, Awaitable
+
+import structlog
+
+from .config import get_config
+from .security import sanitize_input
+
+logger = structlog.get_logger()
+
+# Progress update interval in seconds (5 minutes to avoid spam)
+PROGRESS_UPDATE_INTERVAL = 300
+
+# Retry configuration
+MAX_RETRIES = 2
+RETRY_BASE_DELAY = 5  # seconds
+
+
+class ErrorCategory(str, Enum):
+    """Classification of Claude CLI errors for retry decisions."""
+    TRANSIENT = "transient"
+    PERMANENT = "permanent"
+    INFRASTRUCTURE = "infrastructure"
+
+
+def classify_error(return_code: int, output: str, error_text: str) -> ErrorCategory:
+    """Classify a Claude CLI error to decide whether to retry.
+
+    Returns ErrorCategory indicating if the error is transient (retry),
+    permanent (don't retry), or infrastructure (don't retry).
+    """
+    combined = (output + error_text).lower()
+
+    # Permanent errors - don't retry
+    if "prompt is too long" in combined or "conversation too long" in combined:
+        return ErrorCategory.PERMANENT
+    if "invalid api key" in combined or "authentication" in combined:
+        return ErrorCategory.PERMANENT
+    if "permission denied" in combined:
+        return ErrorCategory.PERMANENT
+
+    # Infrastructure errors - don't retry
+    if return_code == 127:  # Command not found
+        return ErrorCategory.INFRASTRUCTURE
+
+    # Transient errors - worth retrying
+    if "rate limit" in combined or "429" in combined:
+        return ErrorCategory.TRANSIENT
+    if "timeout" in combined or "timed out" in combined:
+        return ErrorCategory.TRANSIENT
+    if "connection" in combined and ("reset" in combined or "refused" in combined):
+        return ErrorCategory.TRANSIENT
+    if "server error" in combined or "500" in combined or "502" in combined:
+        return ErrorCategory.TRANSIENT
+    if return_code in (-9, -15, 137, 143):  # Killed signals
+        return ErrorCategory.TRANSIENT
+
+    # Non-zero exit with no errors - assume transient
+    if return_code != 0 and not error_text.strip():
+        return ErrorCategory.TRANSIENT
+
+    return ErrorCategory.PERMANENT
+
+
+class ClaudeRunner:
+    """Manages Claude CLI execution."""
+
+    def __init__(self):
+        self.config = get_config()
+        self.current_project: Optional[Path] = None
+        self._running_process: Optional[asyncio.subprocess.Process] = None
+        self._guidelines: str = self._load_guidelines()
+
+    def _load_guidelines(self) -> str:
+        """Load the CLAUDE.md guidelines file."""
+        guidelines_path = self.config.config_dir / "CLAUDE.md"
+        if guidelines_path.exists():
+            try:
+                with open(guidelines_path, "r") as f:
+                    content = f.read()
+                logger.info("guidelines_loaded", path=str(guidelines_path))
+                return content
+            except Exception as e:
+                logger.error("guidelines_load_error", error=str(e))
+        return ""
+
+    def set_project(self, project_path: Path):
+        """Set the current project directory."""
+        self.current_project = project_path
+        logger.info("project_set", path=str(project_path))
+
+    async def run_claude(
+        self,
+        prompt: str,
+        timeout: Optional[int] = None,
+        progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        memory_context: Optional[str] = None,
+        max_retries: int = MAX_RETRIES,
+    ) -> Tuple[bool, str]:
+        """
+        Run Claude CLI with the given prompt, retrying on transient errors.
+
+        Args:
+            prompt: The prompt to send to Claude
+            timeout: Optional timeout in seconds
+            progress_callback: Optional async callback for progress updates
+            memory_context: Optional memory context to inject (from MemoryManager)
+            max_retries: Max retries for transient failures (default 2)
+
+        Returns:
+            Tuple of (success, output)
+        """
+        if self.current_project is None:
+            return False, "No project selected. Use /select <project> first."
+
+        if not self.current_project.exists():
+            return False, f"Project directory does not exist: {self.current_project}"
+
+        # Sanitize the prompt
+        prompt = sanitize_input(prompt)
+
+        # Build the full prompt: guidelines + memory context + current task
+        prompt_parts = []
+
+        if self._guidelines:
+            prompt_parts.append(self._guidelines)
+
+        if memory_context:
+            prompt_parts.append(memory_context)
+
+        prompt_parts.append(f"## Current Task\n\n{prompt}")
+
+        full_prompt = "\n\n---\n\n".join(prompt_parts)
+
+        if timeout is None:
+            timeout = self.config.claude_timeout
+
+        # Build the Claude command
+        cmd = [
+            self.config.claude_path,
+            "--print",
+            "--dangerously-skip-permissions",
+            "--verbose",
+            "--max-turns", str(self.config.claude_max_turns),
+            "-p",
+            full_prompt
+        ]
+
+        logger.info(
+            "claude_run_start",
+            project=str(self.current_project),
+            prompt_length=len(prompt),
+            timeout=timeout
+        )
+
+        last_error = ""
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                logger.info(
+                    "claude_retry",
+                    attempt=attempt,
+                    delay=delay,
+                    previous_error=last_error[:200],
+                )
+                if progress_callback:
+                    try:
+                        await progress_callback(
+                            f"Retrying ({attempt}/{max_retries}) after {delay}s delay..."
+                        )
+                    except Exception as e:
+                        logger.warning("progress_callback_error", error=str(e))
+                await asyncio.sleep(delay)
+
+            result = await self._execute_claude_once(
+                cmd=cmd,
+                timeout=timeout,
+                progress_callback=progress_callback,
+            )
+
+            success, output, error_category = result
+            if success:
+                logger.info(
+                    "claude_run_complete",
+                    output_length=len(output),
+                    attempt=attempt + 1,
+                    success=True,
+                )
+                return True, output
+
+            last_error = output
+
+            # Decide whether to retry based on error classification
+            if error_category != ErrorCategory.TRANSIENT:
+                logger.info(
+                    "claude_no_retry",
+                    category=error_category.value,
+                    error=output[:200],
+                )
+                break
+
+        return False, last_error
+
+    async def _execute_claude_once(
+        self,
+        cmd: List[str],
+        timeout: int,
+        progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> Tuple[bool, str, ErrorCategory]:
+        """Execute a single Claude CLI invocation.
+
+        Returns:
+            Tuple of (success, output_or_error, error_category)
+        """
+        progress_task = None
+        start_time = asyncio.get_event_loop().time()
+
+        async def send_progress_updates():
+            """Send periodic progress updates while Claude is running."""
+            while True:
+                await asyncio.sleep(PROGRESS_UPDATE_INTERVAL)
+                elapsed = int(asyncio.get_event_loop().time() - start_time)
+                elapsed_min = elapsed // 60
+                if progress_callback:
+                    try:
+                        await progress_callback(
+                            f"Still working... ({elapsed_min} min elapsed)"
+                        )
+                    except Exception as e:
+                        logger.warning("progress_callback_error", error=str(e))
+
+        try:
+            self._running_process = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(self.current_project),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=None
+            )
+
+            if progress_callback:
+                progress_task = asyncio.create_task(send_progress_updates())
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    self._running_process.communicate(),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                self._running_process.kill()
+                await self._running_process.wait()
+                elapsed = int(asyncio.get_event_loop().time() - start_time)
+                elapsed_min = elapsed // 60
+                logger.warning("claude_timeout", timeout=timeout, elapsed=elapsed)
+                return (
+                    False,
+                    f"Claude timed out after {elapsed_min} minutes. Consider breaking the task into smaller pieces.",
+                    ErrorCategory.TRANSIENT,
+                )
+            finally:
+                if progress_task:
+                    progress_task.cancel()
+                    try:
+                        await progress_task
+                    except asyncio.CancelledError:
+                        pass
+
+            return_code = self._running_process.returncode
+            self._running_process = None
+
+            output = stdout.decode("utf-8", errors="replace")
+            errors = stderr.decode("utf-8", errors="replace")
+
+            if return_code != 0:
+                category = classify_error(return_code, output, errors)
+
+                combined_output = output + errors
+                if "prompt is too long" in combined_output or "Conversation too long" in combined_output:
+                    logger.warning("claude_token_limit", output=combined_output[:500])
+                    return (
+                        False,
+                        "Task too complex - hit token limit. Try:\n"
+                        "1. Break it into smaller tasks\n"
+                        "2. Be more specific about what you need\n"
+                        "3. Work on smaller files/sections",
+                        ErrorCategory.PERMANENT,
+                    )
+
+                if errors:
+                    logger.error(
+                        "claude_error",
+                        return_code=return_code,
+                        stderr=errors[:500],
+                        category=category.value,
+                    )
+                    return False, f"Claude error: {errors[:1000]}", category
+
+                return False, f"Claude exited with code {return_code}", category
+
+            result = output if output else errors
+
+            max_response = 4000
+            if len(result) > max_response:
+                result = result[:max_response] + "\n\n[Response truncated...]"
+
+            return True, result, ErrorCategory.PERMANENT
+
+        except FileNotFoundError:
+            logger.error("claude_not_found")
+            return (
+                False,
+                "Claude CLI not found. Make sure it's installed and in PATH.",
+                ErrorCategory.INFRASTRUCTURE,
+            )
+
+        except Exception as e:
+            logger.error("claude_exception", error=str(e), exc_type=type(e).__name__)
+            return False, f"Error running Claude: {str(e)}", ErrorCategory.INFRASTRUCTURE
+
+    async def cancel(self):
+        """Cancel any running Claude process."""
+        if self._running_process:
+            self._running_process.kill()
+            await self._running_process.wait()
+            self._running_process = None
+            logger.info("claude_cancelled")
+
+
+# Global runner instance
+_runner: Optional[ClaudeRunner] = None
+
+
+def get_runner() -> ClaudeRunner:
+    """Get or create the global Claude runner instance."""
+    global _runner
+    if _runner is None:
+        _runner = ClaudeRunner()
+    return _runner
