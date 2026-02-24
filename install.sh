@@ -3,7 +3,7 @@
 # sidechannel installer
 # Signal + Claude AI Bot
 #
-# Usage: ./install.sh [--skip-signal] [--skip-systemd] [--uninstall]
+# Usage: ./install.sh [--skip-signal] [--skip-systemd] [--uninstall] [--restart]
 #
 
 set -e
@@ -84,6 +84,7 @@ SIGNAL_DATA_DIR="$INSTALL_DIR/signal-data"
 SKIP_SIGNAL=false
 SKIP_SYSTEMD=false
 UNINSTALL=false
+RESTART=false
 
 # Parse arguments
 for arg in "$@"; do
@@ -100,6 +101,10 @@ for arg in "$@"; do
             UNINSTALL=true
             shift
             ;;
+        --restart)
+            RESTART=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: ./install.sh [options]"
             echo ""
@@ -107,6 +112,7 @@ for arg in "$@"; do
             echo "  --skip-signal    Skip Signal pairing (configure later)"
             echo "  --skip-systemd   Skip service installation"
             echo "  --uninstall      Remove sidechannel service and containers"
+            echo "  --restart        Restart the sidechannel service"
             echo "  --help, -h       Show this help message"
             exit 0
             ;;
@@ -192,6 +198,57 @@ if [ "$UNINSTALL" = true ]; then
         echo "  Expected install dir: $INSTALL_DIR"
         echo "  Set SIDECHANNEL_DIR if installed elsewhere."
     fi
+    echo ""
+    exit 0
+fi
+
+# =============================================================================
+# RESTART MODE
+# =============================================================================
+if [ "$RESTART" = true ]; then
+    echo ""
+    echo -e "${CYAN}Restarting sidechannel...${NC}"
+    echo ""
+
+    RESTARTED=false
+
+    # Linux: systemd
+    if [ "$(uname)" = "Linux" ] && command -v systemctl &> /dev/null; then
+        if systemctl --user is-active sidechannel &> /dev/null || systemctl --user is-enabled sidechannel &> /dev/null; then
+            systemctl --user restart sidechannel
+            sleep 2
+            if systemctl --user is-active sidechannel &>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} sidechannel restarted (systemd)"
+            else
+                echo -e "  ${YELLOW}!${NC} Restart issued but service not active yet"
+                echo -e "  Check: ${CYAN}journalctl --user -u sidechannel -f${NC}"
+            fi
+            RESTARTED=true
+        fi
+    fi
+
+    # macOS: launchd
+    if [ "$(uname)" = "Darwin" ] && [ "$RESTARTED" = false ]; then
+        PLIST_FILE="$HOME/Library/LaunchAgents/com.sidechannel.bot.plist"
+        if [ -f "$PLIST_FILE" ]; then
+            launchctl unload "$PLIST_FILE" 2>/dev/null || true
+            launchctl load "$PLIST_FILE" 2>/dev/null
+            sleep 2
+            if launchctl list | grep -q com.sidechannel.bot; then
+                echo -e "  ${GREEN}✓${NC} sidechannel restarted (launchd)"
+            else
+                echo -e "  ${YELLOW}!${NC} Restart issued but service not running"
+                echo -e "  Check: ${CYAN}tail -f $LOGS_DIR/sidechannel.log${NC}"
+            fi
+            RESTARTED=true
+        fi
+    fi
+
+    if [ "$RESTARTED" = false ]; then
+        echo -e "  ${YELLOW}No service found.${NC} Start manually:"
+        echo -e "  ${CYAN}$INSTALL_DIR/run.sh${NC}"
+    fi
+
     echo ""
     exit 0
 fi

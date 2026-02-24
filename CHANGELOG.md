@@ -11,9 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Docker install mode** — the bot no longer runs in a container; removed `Dockerfile`, `--docker`/`--local` flags, and interactive mode selection menu
 - `sidechannel` service from `docker-compose.yml` — compose now only manages the Signal bridge
 
+### Added
+- `./install.sh --restart` flag to restart the sidechannel service (systemd or launchd)
+
 ### Changed
 - Installer is now a single code path (Python venv + Signal bridge in Docker)
-- Installer runs from the repo directory instead of copying to `~/sidechannel`
+- Installer runs from the repo directory instead of copying to `~/sidechannel` — `git pull` updates code immediately
 - `docker-compose.yml` is a signal-bridge-only compose file
 
 ### Fixed
