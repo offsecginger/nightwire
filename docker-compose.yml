@@ -32,3 +32,4 @@ services:
       - ./config/.env
     environment:
       - SIDECHANNEL_CONFIG_DIR=/app/config
+      - SIGNAL_API_URL=http://signal-api:8080

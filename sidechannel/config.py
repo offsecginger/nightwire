@@ -75,8 +75,8 @@ class Config:
 
     @property
     def signal_api_url(self) -> str:
-        """Get Signal API URL."""
-        return self.settings.get("signal_api_url", "http://127.0.0.1:8080")
+        """Get Signal API URL. Env var SIGNAL_API_URL takes precedence (for Docker)."""
+        return os.environ.get("SIGNAL_API_URL") or self.settings.get("signal_api_url", "http://127.0.0.1:8080")
 
     @property
     def projects_base_path(self) -> Path:
