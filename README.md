@@ -98,9 +98,9 @@ Everything runs in containers — no Python venv, no systemd.
 ./install.sh --docker
 ```
 
-1. Checks Docker and Docker Compose are available
+1. Checks Docker, Docker Compose, and Claude CLI are available
 2. Creates directory structure and copies source files
-3. Configures your phone number and API keys
+3. Configures your phone number
 4. Sets up Signal device linking via QR code
 5. Runs `docker compose build && docker compose up -d`
 
@@ -115,7 +115,7 @@ Traditional Python venv with optional systemd service.
 1. Checks prerequisites (Python 3.10+, Docker, Claude CLI)
 2. Creates a virtual environment and installs dependencies
 3. Sets up Signal CLI REST API with QR code device linking
-4. Configures your phone number and API keys
+4. Configures your phone number
 5. Optionally installs as a systemd service
 
 If you run `./install.sh` without flags, you'll get an interactive menu to choose.
@@ -379,12 +379,17 @@ sidechannel_assistant:
   # max_tokens: 1024
 ```
 
+### Claude CLI Authentication
+
+Claude CLI handles its own authentication — no API key needed in `.env`.
+
+```bash
+claude login
+```
+
 ### Environment Variables (.env)
 
 ```bash
-# Required
-ANTHROPIC_API_KEY=sk-ant-...
-
 # Optional (for sidechannel AI assistant) — set one or both
 OPENAI_API_KEY=sk-...
 GROK_API_KEY=xai-...
@@ -832,7 +837,7 @@ The autonomous system is designed for tasks too large for a single Claude invoca
 ### Claude commands failing
 
 1. Verify Claude CLI works: `claude --version`
-2. Check API key: `echo $ANTHROPIC_API_KEY`
+2. Check authentication: `claude login`
 3. Test manually: `claude "hello"`
 
 ### Memory not persisting
