@@ -629,174 +629,225 @@ fi
 # -----------------------------------------------------------------------------
 if [ "$SKIP_SIGNAL" = false ]; then
     echo ""
-    echo -e "${BLUE}Signal Device Linking${NC}"
+    echo -e "${BLUE}Signal Protocol Bridge${NC}"
     echo ""
-    echo "  sidechannel communicates via the Signal protocol. This requires a"
-    echo "  lightweight Docker container (signal-cli-rest-api) that acts as a"
-    echo "  bridge between sidechannel and Signal's servers."
+    echo "  sidechannel needs a Signal protocol bridge (signal-cli-rest-api)"
+    echo "  to send and receive messages. How would you like to run it?"
     echo ""
 
-    # Check Docker is available for the Signal bridge
-    if ! command -v docker &> /dev/null; then
-        echo -e "${YELLOW}  Docker is not installed.${NC}"
-        echo -e "  Install Docker: ${CYAN}https://docs.docker.com/get-docker/${NC}"
-        echo -e "  Then re-run: ${CYAN}./install.sh --local${NC}"
-        echo ""
-        read -p "  Skip Signal setup for now? [Y/n] " -n 1 -r
-        echo ""
-        if [[ $REPLY =~ ^[Nn]$ ]]; then
-            echo "  Install Docker first, then re-run the installer."
-            exit 0
-        fi
-        SKIP_SIGNAL=true
-    elif ! docker info &> /dev/null; then
-        echo -e "${YELLOW}  Docker is installed but not running.${NC}"
-        echo ""
-        echo "  Start Docker Desktop (or the Docker daemon), then press Enter."
-        echo "  Or press 's' to skip Signal setup for now."
-        echo ""
-        read -p "  > " -n 1 -r
-        echo ""
+    # Determine available options
+    DOCKER_AVAILABLE=false
+    if command -v docker &> /dev/null && docker info &> /dev/null; then
+        DOCKER_AVAILABLE=true
+    fi
 
-        if [[ $REPLY =~ ^[Ss]$ ]]; then
-            SKIP_SIGNAL=true
-        else
-            # Wait and retry
-            echo "  Waiting for Docker..."
-            for i in 1 2 3 4 5; do
-                if docker info &> /dev/null; then
-                    echo -e "  ${GREEN}✓${NC} Docker is running"
-                    break
+    if [ "$DOCKER_AVAILABLE" = true ]; then
+        echo "  1) Docker container (recommended)"
+        echo "  2) Native signal-cli (install separately)"
+        echo "  3) Already running / set up later"
+        echo ""
+        read -p "  > " SIGNAL_CHOICE
+    else
+        echo "  1) Native signal-cli (install separately)"
+        echo "  2) Already running / set up later"
+        echo ""
+        read -p "  > " SIGNAL_NATIVE_CHOICE
+        # Remap choices since Docker isn't an option
+        case "$SIGNAL_NATIVE_CHOICE" in
+            1) SIGNAL_CHOICE="2" ;;
+            *) SIGNAL_CHOICE="3" ;;
+        esac
+    fi
+
+    echo ""
+
+    case "$SIGNAL_CHOICE" in
+        1)
+            # Docker-based Signal bridge
+            REMOTE_MODE=false
+            SIGNAL_BIND="127.0.0.1"
+
+            read -p "Is this a remote/headless server (VPS, cloud)? [y/N] " -n 1 -r
+            echo ""
+
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                REMOTE_MODE=true
+                SIGNAL_BIND="0.0.0.0"
+                echo -e "${YELLOW}  Note: Signal API will be temporarily exposed on 0.0.0.0:8080"
+                echo -e "  for QR code access. It will be locked to localhost after linking.${NC}"
+                echo ""
+            fi
+
+            mkdir -p "$SIGNAL_DATA_DIR"
+
+            echo -e "${CYAN}Starting Signal bridge container...${NC}"
+            docker pull bbernhard/signal-cli-rest-api:0.80 -q
+
+            docker stop signal-api 2>/dev/null || true
+            docker rm signal-api 2>/dev/null || true
+
+            docker run -d \
+                --name signal-api \
+                --restart unless-stopped \
+                -p "$SIGNAL_BIND:8080:8080" \
+                -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
+                -e MODE=native \
+                bbernhard/signal-cli-rest-api:0.80
+
+            echo "  Waiting for container..."
+            sleep 5
+
+            if ! docker ps | grep -q signal-api; then
+                echo -e "${RED}  Signal container failed to start${NC}"
+                docker logs signal-api 2>&1 | tail -5
+            else
+                echo -e "  ${GREEN}✓${NC} Signal bridge running"
+                echo ""
+
+                # --- Device linking ---
+                echo -e "${GREEN}  Link your phone to sidechannel:${NC}"
+                echo ""
+                echo "  1. Open Signal on your phone"
+                echo "  2. Settings > Linked Devices > Link New Device"
+                echo "  3. Scan the QR code:"
+                echo ""
+
+                LINK_URI=$(curl -s "http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel" | grep -o 'sgnl://[^"]*' 2>/dev/null || true)
+
+                if command -v qrencode &> /dev/null && [ -n "$LINK_URI" ]; then
+                    echo "$LINK_URI" | qrencode -t ANSIUTF8
+                    echo ""
                 fi
+
+                if [ "$REMOTE_MODE" = true ]; then
+                    SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+                    [ -z "$SERVER_IP" ] && SERVER_IP="<your-server-ip>"
+                    echo -e "     Browser: ${CYAN}http://${SERVER_IP}:8080/v1/qrcodelink?device_name=sidechannel${NC}"
+                else
+                    echo -e "     Browser: ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
+                fi
+
+                if ! command -v qrencode &> /dev/null; then
+                    echo ""
+                    echo -e "     ${YELLOW}Tip:${NC} Install 'qrencode' for terminal QR display"
+                fi
+
+                echo ""
+                read -p "Press Enter after scanning the QR code..."
+
+                echo ""
+                echo -e "${CYAN}Verifying...${NC}"
                 sleep 2
-            done
 
-            if ! docker info &> /dev/null; then
-                echo -e "${YELLOW}  Docker still not running — skipping Signal setup.${NC}"
-                SKIP_SIGNAL=true
-            fi
-        fi
-    fi
-fi
+                ACCOUNTS=$(curl -s "http://127.0.0.1:8080/v1/accounts" 2>/dev/null)
+                if echo "$ACCOUNTS" | grep -q "+"; then
+                    LINKED_NUMBER=$(echo "$ACCOUNTS" | grep -o '+[0-9]*' | head -1)
+                    echo -e "  ${GREEN}✓${NC} Device linked: $LINKED_NUMBER"
 
-if [ "$SKIP_SIGNAL" = false ]; then
-    read -p "Link your Signal account now? [Y/n] " -n 1 -r
-    echo ""
-
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-        # Remote/headless detection
-        REMOTE_MODE=false
-        SIGNAL_BIND="127.0.0.1"
-
-        read -p "Is this a remote/headless server (VPS, cloud)? [y/N] " -n 1 -r
-        echo ""
-
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            REMOTE_MODE=true
-            SIGNAL_BIND="0.0.0.0"
-            echo ""
-            echo -e "${YELLOW}  Note: Signal API will be temporarily exposed on all interfaces (0.0.0.0:8080)"
-            echo -e "  for QR code access. It will be locked to localhost after linking.${NC}"
-            echo ""
-        fi
-
-        mkdir -p "$SIGNAL_DATA_DIR"
-
-        echo -e "${CYAN}Starting Signal bridge container...${NC}"
-        docker pull bbernhard/signal-cli-rest-api:0.80 -q
-
-        docker stop signal-api 2>/dev/null || true
-        docker rm signal-api 2>/dev/null || true
-
-        docker run -d \
-            --name signal-api \
-            --restart unless-stopped \
-            -p "$SIGNAL_BIND:8080:8080" \
-            -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
-            -e MODE=native \
-            bbernhard/signal-cli-rest-api:0.80
-
-        echo "  Waiting for container..."
-        sleep 5
-
-        if ! docker ps | grep -q signal-api; then
-            echo -e "${RED}Error: Signal container failed to start${NC}"
-            docker logs signal-api 2>&1 | tail -5
-            echo -e "${YELLOW}You can re-run Signal setup later with: ./install.sh --local${NC}"
-        else
-            echo ""
-            echo -e "${GREEN}  Link your phone to sidechannel:${NC}"
-            echo ""
-            echo "  1. Open Signal on your phone"
-            echo "  2. Settings > Linked Devices > Link New Device"
-            echo "  3. Scan the QR code:"
-            echo ""
-
-            # Get QR code link (single request)
-            LINK_URI=$(curl -s "http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel" | grep -o 'sgnl://[^"]*' 2>/dev/null || true)
-
-            # Terminal QR code
-            if command -v qrencode &> /dev/null && [ -n "$LINK_URI" ]; then
-                echo "$LINK_URI" | qrencode -t ANSIUTF8
-                echo ""
-            fi
-
-            # Browser URL
-            if [ "$REMOTE_MODE" = true ]; then
-                SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-                [ -z "$SERVER_IP" ] && SERVER_IP="<your-server-ip>"
-                echo -e "     Browser: ${CYAN}http://${SERVER_IP}:8080/v1/qrcodelink?device_name=sidechannel${NC}"
-            else
-                echo -e "     Browser: ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
-            fi
-
-            if ! command -v qrencode &> /dev/null; then
-                echo ""
-                echo -e "     ${YELLOW}Tip:${NC} Install 'qrencode' for terminal QR display"
-            fi
-
-            echo ""
-            read -p "Press Enter after scanning the QR code..."
-
-            echo ""
-            echo -e "${CYAN}Verifying...${NC}"
-            sleep 2
-
-            ACCOUNTS=$(curl -s "http://127.0.0.1:8080/v1/accounts" 2>/dev/null)
-            if echo "$ACCOUNTS" | grep -q "+"; then
-                LINKED_NUMBER=$(echo "$ACCOUNTS" | grep -o '+[0-9]*' | head -1)
-                echo -e "  ${GREEN}✓${NC} Device linked: $LINKED_NUMBER"
-
-                if [ "$LINKED_NUMBER" != "$PHONE_NUMBER" ] && [ -n "$LINKED_NUMBER" ]; then
-                    sed_inplace "s/$PHONE_NUMBER/$LINKED_NUMBER/" "$SETTINGS_FILE" 2>/dev/null || true
+                    if [ "$LINKED_NUMBER" != "$PHONE_NUMBER" ] && [ -n "$LINKED_NUMBER" ]; then
+                        sed_inplace "s/$PHONE_NUMBER/$LINKED_NUMBER/" "$SETTINGS_FILE" 2>/dev/null || true
+                    fi
+                else
+                    echo -e "${YELLOW}  Could not verify link. Check: http://127.0.0.1:8080/v1/accounts${NC}"
                 fi
-            else
-                echo -e "${YELLOW}  Could not verify link. Check: http://127.0.0.1:8080/v1/accounts${NC}"
+
+                # Lock down to localhost if remote mode was used
+                if [ "$REMOTE_MODE" = true ]; then
+                    echo -e "${CYAN}  Securing Signal API to localhost only...${NC}"
+                    docker stop signal-api 2>/dev/null || true
+                    docker rm signal-api 2>/dev/null || true
+
+                    docker run -d \
+                        --name signal-api \
+                        --restart unless-stopped \
+                        -p 127.0.0.1:8080:8080 \
+                        -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
+                        -e MODE=native \
+                        bbernhard/signal-cli-rest-api:0.80
+
+                    sleep 3
+                    if docker ps | grep -q signal-api; then
+                        echo -e "  ${GREEN}✓${NC} Signal API secured (127.0.0.1 only)"
+                    fi
+                fi
+
+                echo -e "  ${GREEN}✓${NC} Signal bridge configured"
             fi
+            ;;
 
-            # Lock down to localhost if remote mode was used
-            if [ "$REMOTE_MODE" = true ]; then
-                echo -e "${CYAN}  Securing Signal API to localhost only...${NC}"
-                docker stop signal-api 2>/dev/null || true
-                docker rm signal-api 2>/dev/null || true
+        2)
+            # Native signal-cli setup instructions
+            echo -e "${BLUE}Native signal-cli Setup${NC}"
+            echo ""
+            echo "  Install signal-cli for your platform:"
+            echo ""
+            if [ "$(uname)" = "Darwin" ]; then
+                echo -e "    ${CYAN}brew install signal-cli${NC}"
+            else
+                echo -e "    Download: ${CYAN}https://github.com/AsamK/signal-cli/releases${NC}"
+            fi
+            echo ""
+            echo "  Then start the REST API:"
+            echo ""
+            echo -e "    Download signal-cli-rest-api:"
+            echo -e "    ${CYAN}https://github.com/bbernhard/signal-cli-rest-api${NC}"
+            echo ""
+            echo "  Or link your device directly with signal-cli:"
+            echo ""
+            echo -e "    ${CYAN}signal-cli link -n sidechannel${NC}"
+            echo ""
+            echo "  Make sure the REST API is accessible at the URL in your"
+            echo "  settings.yaml (default: http://127.0.0.1:8080)"
+            echo ""
 
-                docker run -d \
-                    --name signal-api \
-                    --restart unless-stopped \
-                    -p 127.0.0.1:8080:8080 \
-                    -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
-                    -e MODE=native \
-                    bbernhard/signal-cli-rest-api:0.80
+            # Check if signal-cli is already installed and offer to link now
+            if command -v signal-cli &> /dev/null; then
+                echo -e "  ${GREEN}✓${NC} signal-cli found"
+                echo ""
+                read -p "  Link your Signal account now using signal-cli? [Y/n] " -n 1 -r
+                echo ""
 
-                sleep 3
-                if docker ps | grep -q signal-api; then
-                    echo -e "  ${GREEN}✓${NC} Signal API secured (127.0.0.1 only)"
+                if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                    echo ""
+                    echo -e "${CYAN}Starting device link...${NC}"
+                    echo ""
+                    echo "  1. Open Signal on your phone"
+                    echo "  2. Settings > Linked Devices > Link New Device"
+                    echo "  3. Scan the QR code that appears below:"
+                    echo ""
+
+                    # signal-cli link outputs a URI — display as QR if possible
+                    LINK_URI=$(signal-cli link -n sidechannel 2>/dev/null | grep -o 'sgnl://[^"]*' || true)
+
+                    if [ -n "$LINK_URI" ]; then
+                        if command -v qrencode &> /dev/null; then
+                            echo "$LINK_URI" | qrencode -t ANSIUTF8
+                        else
+                            echo "  Link URI: $LINK_URI"
+                            echo ""
+                            echo -e "  ${YELLOW}Tip:${NC} Install 'qrencode' to display as QR code"
+                        fi
+                        echo ""
+                        echo -e "  ${GREEN}✓${NC} Device linking initiated"
+                    else
+                        echo -e "${YELLOW}  Could not get link URI from signal-cli.${NC}"
+                        echo "  Try manually: signal-cli link -n sidechannel"
+                    fi
                 fi
             fi
 
-            echo -e "  ${GREEN}✓${NC} Signal bridge configured"
-        fi
-    fi
+            SIGNAL_NATIVE=true
+            SKIP_SIGNAL=true
+            ;;
+
+        *)
+            # Skip for now
+            echo "  Skipping Signal setup. You can set it up later."
+            echo ""
+            echo "  See: ${CYAN}https://github.com/bbernhard/signal-cli-rest-api${NC}"
+            SKIP_SIGNAL=true
+            ;;
+    esac
 fi
 
 # -----------------------------------------------------------------------------
@@ -883,18 +934,26 @@ else
 fi
 
 # Signal pairing
-if [ "$SKIP_SIGNAL" = true ]; then
+if [ "${SIGNAL_NATIVE:-}" = true ]; then
     echo ""
-    echo "  $STEP. Set up Signal (skipped during install):"
+    echo "  $STEP. Start the Signal bridge (signal-cli-rest-api) on port 8080"
     STEP=$((STEP + 1))
-    echo "     a. Make sure Docker is installed and running"
-    echo "     b. Re-run: ./install.sh --local"
-    echo "     Or manually:"
+    echo "     See: https://github.com/bbernhard/signal-cli-rest-api"
+elif [ "$SKIP_SIGNAL" = true ]; then
+    echo ""
+    echo "  $STEP. Set up Signal protocol bridge:"
+    STEP=$((STEP + 1))
+    echo "     Option A: Docker"
     echo "       docker run -d --name signal-api --restart unless-stopped \\"
-    echo "         -p 127.0.0.1:8080:8080 \\"
-    echo "         -v $SIGNAL_DATA_DIR:/home/.local/share/signal-cli \\"
-    echo "         -e MODE=native bbernhard/signal-cli-rest-api:0.80"
-    echo "       Then pair: http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel"
+    echo "         -p 127.0.0.1:8080:8080 -e MODE=native \\"
+    echo "         bbernhard/signal-cli-rest-api:0.80"
+    echo "     Option B: Native signal-cli"
+    if [ "$(uname)" = "Darwin" ]; then
+        echo "       brew install signal-cli"
+    else
+        echo "       https://github.com/AsamK/signal-cli/releases"
+    fi
+    echo "     Then pair: http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel"
 fi
 
 # How to start
