@@ -73,6 +73,13 @@ sidechannel_assistant:
 #   - daily_verse
 #   - bluos_music
 
+# Auto-Update (optional, default off)
+# Periodically checks for new commits and notifies admin via Signal
+# auto_update:
+#   enabled: false
+#   check_interval: 21600      # Seconds between checks (default: 6 hours)
+#   branch: "main"             # Git branch to track
+
 # Docker Sandbox (optional, default off)
 # Runs Claude task execution inside a Docker container for isolation
 # sandbox:

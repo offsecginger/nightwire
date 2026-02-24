@@ -298,6 +298,25 @@ class Config:
         user_levels = auto_config.get("effort_levels", {})
         return {**defaults, **user_levels}
 
+    # Auto-update configuration
+    @property
+    def auto_update_enabled(self) -> bool:
+        """Whether auto-update checking is enabled."""
+        update_config = self.settings.get("auto_update", {})
+        return update_config.get("enabled", False)
+
+    @property
+    def auto_update_check_interval(self) -> int:
+        """Seconds between update checks (default 6 hours)."""
+        update_config = self.settings.get("auto_update", {})
+        return update_config.get("check_interval", 21600)
+
+    @property
+    def auto_update_branch(self) -> str:
+        """Git branch to track for updates."""
+        update_config = self.settings.get("auto_update", {})
+        return update_config.get("branch", "main")
+
     @property
     def allowed_paths(self) -> List[Path]:
         """Get list of additional allowed paths (outside projects_base_path)."""
