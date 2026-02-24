@@ -14,9 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Security scan in quality gates (detects os.system, shell=True, eval, hardcoded keys, IP exfil)
 - Static analysis regression test (no shell=True or os.system in codebase)
 - Resource guard: checks memory/CPU before spawning parallel workers
+- `make security` target (bandit + safety), `make typecheck` target (mypy), `make check` target (lint + typecheck + test + security)
 
 ### Changed
 - psutil added as dependency for resource monitoring
+- Dev dependencies expanded: mypy, bandit, safety
 
 ### Security
 - Path validation enforced in `ClaudeRunner.set_project()`
