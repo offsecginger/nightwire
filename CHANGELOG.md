@@ -12,10 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sidechannel` service from `docker-compose.yml` — compose now only manages the Signal bridge
 
 ### Changed
-- Installer is now a single code path (local Python venv + Signal bridge in Docker)
+- Installer is now a single code path (Python venv + Signal bridge in Docker)
+- Installer runs from the repo directory instead of copying to `~/sidechannel`
 - `docker-compose.yml` is a signal-bridge-only compose file
 
 ### Fixed
+- Signal bridge restarted in `json-rpc` mode after pairing (was left in `native` mode, breaking WebSocket message receiving)
 - Bot startup now retries Signal API connection (12 attempts over ~90s) instead of failing immediately when signal-api is still starting
 
 ## [1.3.0] - 2026-02-24

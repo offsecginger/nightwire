@@ -71,8 +71,9 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Configuration
-INSTALL_DIR="${SIDECHANNEL_DIR:-$HOME/sidechannel}"
+# Configuration — default to the repo directory (where install.sh lives)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_DIR="${SIDECHANNEL_DIR:-$SCRIPT_DIR}"
 VENV_DIR="$INSTALL_DIR/venv"
 CONFIG_DIR="$INSTALL_DIR/config"
 DATA_DIR="$INSTALL_DIR/data"
@@ -358,52 +359,28 @@ fi
 echo ""
 
 # -----------------------------------------------------------------------------
-# Create directory structure
+# Verify source and create data directories
 # -----------------------------------------------------------------------------
-echo -e "${BLUE}Creating directory structure...${NC}"
+echo -e "${BLUE}Setting up directories...${NC}"
 
-mkdir -p "$INSTALL_DIR"
+if [ ! -d "$INSTALL_DIR/sidechannel" ]; then
+    echo -e "${RED}Error: sidechannel package not found in $INSTALL_DIR${NC}"
+    echo "  Run this installer from the sidechannel repo directory."
+    exit 1
+fi
+
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$DATA_DIR"
 mkdir -p "$LOGS_DIR"
 mkdir -p "$SIGNAL_DATA_DIR"
 
-echo -e "  ${GREEN}✓${NC} Created $INSTALL_DIR"
-
-# -----------------------------------------------------------------------------
-# Copy source files
-# -----------------------------------------------------------------------------
-echo -e "${BLUE}Copying source files...${NC}"
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Copy Python package
-if [ -d "$SCRIPT_DIR/sidechannel" ]; then
-    cp -r "$SCRIPT_DIR/sidechannel" "$INSTALL_DIR/"
-    echo -e "  ${GREEN}✓${NC} Copied sidechannel package"
-else
-    echo -e "${RED}Error: sidechannel package not found in $SCRIPT_DIR${NC}"
-    exit 1
+# Copy config templates if not already present
+if [ -d "$INSTALL_DIR/config" ]; then
+    cp -n "$INSTALL_DIR/config/"*.example "$CONFIG_DIR/" 2>/dev/null || true
+    cp -n "$INSTALL_DIR/config/CLAUDE.md" "$CONFIG_DIR/" 2>/dev/null || true
 fi
 
-# Copy plugins if present
-if [ -d "$SCRIPT_DIR/plugins" ]; then
-    cp -r "$SCRIPT_DIR/plugins" "$INSTALL_DIR/"
-    echo -e "  ${GREEN}✓${NC} Copied plugins"
-fi
-
-# Copy config templates
-if [ -d "$SCRIPT_DIR/config" ]; then
-    cp "$SCRIPT_DIR/config/"*.example "$CONFIG_DIR/" 2>/dev/null || true
-    cp "$SCRIPT_DIR/config/CLAUDE.md" "$CONFIG_DIR/" 2>/dev/null || true
-    echo -e "  ${GREEN}✓${NC} Copied config templates"
-fi
-
-# Copy requirements
-cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/"
-
-# Copy docker-compose for Signal bridge
-cp "$SCRIPT_DIR/docker-compose.yml" "$INSTALL_DIR/" 2>/dev/null || true
+echo -e "  ${GREEN}✓${NC} Ready ($INSTALL_DIR)"
 
 # -----------------------------------------------------------------------------
 # Create virtual environment
@@ -559,6 +536,7 @@ if [ "$SKIP_SIGNAL" = false ]; then
         echo ""
     fi
 
+    # Start in native mode for QR code pairing
     docker stop signal-api 2>/dev/null || true
     docker rm signal-api 2>/dev/null || true
 
@@ -637,26 +615,6 @@ if [ "$SKIP_SIGNAL" = false ]; then
                 fi
             fi
         fi
-
-        # Lock down to localhost after pairing if remote mode was used
-        if [ "$REMOTE_MODE" = true ]; then
-            echo -e "  Securing Signal bridge to localhost..."
-            docker stop signal-api 2>/dev/null || true
-            docker rm signal-api 2>/dev/null || true
-
-            docker run -d \
-                --name signal-api \
-                --restart unless-stopped \
-                -p 127.0.0.1:8080:8080 \
-                -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
-                -e MODE=native \
-                bbernhard/signal-cli-rest-api:latest
-
-            sleep 3
-            if docker ps | grep -q signal-api; then
-                echo -e "  ${GREEN}✓${NC} Signal bridge secured (localhost only)"
-            fi
-        fi
     else
         echo ""
         echo -e "  ${YELLOW}Signal bridge is taking too long to initialize.${NC}"
@@ -668,26 +626,29 @@ if [ "$SKIP_SIGNAL" = false ]; then
         echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
         echo ""
         echo "  The install will continue — you can pair later."
+    fi
 
-        # Lock down to localhost if remote mode was used
-        if [ "$REMOTE_MODE" = true ]; then
-            echo -e "  Securing Signal bridge to localhost..."
-            docker stop signal-api 2>/dev/null || true
-            docker rm signal-api 2>/dev/null || true
+    # Restart signal-api in json-rpc mode on localhost.
+    # Pairing uses native mode for QR codes, but the bot needs json-rpc
+    # for WebSocket message receiving. Also locks down to 127.0.0.1 if
+    # remote mode was used during pairing.
+    echo -e "  Restarting Signal bridge in json-rpc mode..."
+    docker stop signal-api 2>/dev/null || true
+    docker rm signal-api 2>/dev/null || true
 
-            docker run -d \
-                --name signal-api \
-                --restart unless-stopped \
-                -p 127.0.0.1:8080:8080 \
-                -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
-                -e MODE=native \
-                bbernhard/signal-cli-rest-api:latest
+    docker run -d \
+        --name signal-api \
+        --restart unless-stopped \
+        -p 127.0.0.1:8080:8080 \
+        -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
+        -e MODE=json-rpc \
+        bbernhard/signal-cli-rest-api:latest
 
-            sleep 3
-            if docker ps | grep -q signal-api; then
-                echo -e "  ${GREEN}✓${NC} Signal bridge secured (localhost only)"
-            fi
-        fi
+    sleep 3
+    if docker ps | grep -q signal-api; then
+        echo -e "  ${GREEN}✓${NC} Signal bridge running (json-rpc mode)"
+    else
+        echo -e "  ${YELLOW}Signal bridge did not start. Check: docker logs signal-api${NC}"
     fi
 fi
 
