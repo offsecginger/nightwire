@@ -92,6 +92,9 @@ def run():
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except SystemExit as e:
+        # Propagate exit code (e.g., 75 for update restart)
+        sys.exit(e.code)
 
 
 if __name__ == "__main__":
