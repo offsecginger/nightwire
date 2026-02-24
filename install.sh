@@ -3,7 +3,7 @@
 # sidechannel installer
 # Signal + Claude AI Bot
 #
-# Usage: ./install.sh [--skip-signal] [--skip-systemd] [--docker] [--local]
+# Usage: ./install.sh [--skip-signal] [--skip-systemd] [--docker] [--local] [--uninstall]
 #
 
 set -e
@@ -37,6 +37,7 @@ SIGNAL_DATA_DIR="$INSTALL_DIR/signal-data"
 SKIP_SIGNAL=false
 SKIP_SYSTEMD=false
 INSTALL_MODE=""
+UNINSTALL=false
 
 # Parse arguments
 for arg in "$@"; do
@@ -57,6 +58,10 @@ for arg in "$@"; do
             INSTALL_MODE="local"
             shift
             ;;
+        --uninstall)
+            UNINSTALL=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: ./install.sh [options]"
             echo ""
@@ -65,11 +70,82 @@ for arg in "$@"; do
             echo "  --local          Install using local Python venv"
             echo "  --skip-signal    Skip Signal CLI REST API setup (local mode)"
             echo "  --skip-systemd   Skip systemd service installation (local mode)"
+            echo "  --uninstall      Remove sidechannel service and containers"
             echo "  --help, -h       Show this help message"
             exit 0
             ;;
     esac
 done
+
+# =============================================================================
+# UNINSTALL MODE
+# =============================================================================
+if [ "$UNINSTALL" = true ]; then
+    echo ""
+    echo -e "${CYAN}sidechannel uninstaller${NC}"
+    echo ""
+
+    REMOVED_SOMETHING=false
+
+    # --- Stop and disable systemd service ---
+    if [ "$(uname)" = "Linux" ] && command -v systemctl &> /dev/null; then
+        SERVICE_FILE="$HOME/.config/systemd/user/sidechannel.service"
+        if systemctl --user is-active sidechannel &> /dev/null || [ -f "$SERVICE_FILE" ]; then
+            echo -e "${BLUE}Removing systemd service...${NC}"
+            systemctl --user stop sidechannel 2>/dev/null || true
+            systemctl --user disable sidechannel 2>/dev/null || true
+            rm -f "$SERVICE_FILE"
+            systemctl --user daemon-reload
+            echo -e "  ${GREEN}✓${NC} Service stopped and removed"
+            REMOVED_SOMETHING=true
+        fi
+    fi
+
+    # --- Stop Docker containers ---
+    if command -v docker &> /dev/null; then
+        for CONTAINER in sidechannel signal-api; do
+            if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+                echo -e "${BLUE}Stopping Docker container: ${CONTAINER}...${NC}"
+                docker stop "$CONTAINER" 2>/dev/null || true
+                docker rm "$CONTAINER" 2>/dev/null || true
+                echo -e "  ${GREEN}✓${NC} Container $CONTAINER removed"
+                REMOVED_SOMETHING=true
+            fi
+        done
+    fi
+
+    # --- Remove install directory (with confirmation) ---
+    if [ -d "$INSTALL_DIR" ]; then
+        echo ""
+        echo -e "${YELLOW}The install directory contains your configuration and data:${NC}"
+        echo -e "  ${CYAN}$INSTALL_DIR${NC}"
+        echo ""
+        echo "  This includes settings.yaml, .env (API keys), Signal data,"
+        echo "  and any plugin data."
+        echo ""
+        read -p "Remove install directory? [y/N] " -n 1 -r
+        echo ""
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            rm -rf "$INSTALL_DIR"
+            echo -e "  ${GREEN}✓${NC} Removed $INSTALL_DIR"
+            REMOVED_SOMETHING=true
+        else
+            echo "  Kept $INSTALL_DIR"
+        fi
+    fi
+
+    if [ "$REMOVED_SOMETHING" = true ]; then
+        echo ""
+        echo -e "${GREEN}sidechannel has been uninstalled.${NC}"
+    else
+        echo -e "${YELLOW}Nothing to uninstall.${NC} No service, containers, or install directory found."
+        echo ""
+        echo "  Expected install dir: $INSTALL_DIR"
+        echo "  Set SIDECHANNEL_DIR if installed elsewhere."
+    fi
+    echo ""
+    exit 0
+fi
 
 # Banner
 echo -e "${CYAN}"
