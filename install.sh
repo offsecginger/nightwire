@@ -559,115 +559,133 @@ if [ "$SKIP_SIGNAL" = false ]; then
         echo ""
     fi
 
-    if [ "$SKIP_SIGNAL" = false ]; then
-        docker stop signal-api 2>/dev/null || true
-        docker rm signal-api 2>/dev/null || true
+    docker stop signal-api 2>/dev/null || true
+    docker rm signal-api 2>/dev/null || true
 
-        docker run -d \
-            --name signal-api \
-            --restart unless-stopped \
-            -p "$SIGNAL_BIND:8080:8080" \
-            -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
-            -e MODE=native \
-            bbernhard/signal-cli-rest-api:latest
+    docker run -d \
+        --name signal-api \
+        --restart unless-stopped \
+        -p "$SIGNAL_BIND:8080:8080" \
+        -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
+        -e MODE=native \
+        bbernhard/signal-cli-rest-api:latest
 
-        if ! docker ps | grep -q signal-api; then
-            echo -e "  ${RED}Signal bridge failed to start${NC}"
-            docker logs signal-api 2>&1 | tail -5
-            echo ""
-            echo -e "  You can re-run the installer later to set up Signal."
-        elif wait_for_qrcode 90; then
-            echo ""
-            echo -e "  ${GREEN}✓${NC} Signal bridge ready"
-            echo ""
+    if ! docker ps | grep -q signal-api; then
+        echo -e "  ${RED}Signal bridge failed to start${NC}"
+        docker logs signal-api 2>&1 | tail -5
+        echo ""
+        echo -e "  You can re-run the installer later to set up Signal."
+    elif wait_for_qrcode 90; then
+        echo ""
+        echo -e "  ${GREEN}✓${NC} Signal bridge ready"
+        echo ""
 
-            # --- Device linking ---
-            echo -e "  ${GREEN}Link your phone to sidechannel:${NC}"
-            echo ""
-            echo "    1. Open this URL in your browser to see the QR code:"
-            echo ""
-            if [ "$REMOTE_MODE" = true ]; then
-                SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-                [ -z "$SERVER_IP" ] && SERVER_IP=$(ipconfig getifaddr en0 2>/dev/null || echo "<your-server-ip>")
-                echo -e "       ${CYAN}http://${SERVER_IP}:8080/v1/qrcodelink?device_name=sidechannel${NC}"
-            else
-                echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
-            fi
-            echo ""
-            echo "    2. Open Signal on your phone"
-            echo "    3. Settings > Linked Devices > Link New Device"
-            echo "    4. Scan the QR code from your browser"
-            echo ""
-            flush_stdin
-            read -p "  Press Enter after scanning the QR code..."
-
-            echo ""
-            echo -e "  Verifying link..."
-            sleep 3
-
-            ACCOUNTS=$(curl -s "http://127.0.0.1:8080/v1/accounts" 2>/dev/null)
-            if echo "$ACCOUNTS" | grep -q "+"; then
-                LINKED_NUMBER=$(echo "$ACCOUNTS" | grep -o '+[0-9]*' | head -1)
-                echo -e "  ${GREEN}✓${NC} Device linked: $LINKED_NUMBER"
-
-                if [ "$LINKED_NUMBER" != "$PHONE_NUMBER" ] && [ -n "$LINKED_NUMBER" ]; then
-                    sed_inplace "s/$PHONE_NUMBER/$LINKED_NUMBER/" "$SETTINGS_FILE" 2>/dev/null || true
-                fi
-                SIGNAL_PAIRED=true
-            else
-                echo -e "  ${YELLOW}Could not verify link.${NC}"
-                echo -e "  Check: ${CYAN}http://127.0.0.1:8080/v1/accounts${NC}"
-                echo ""
-                echo "  You may need to wait a moment and try scanning again."
-                flush_stdin
-                read -p "  Retry verification? [Y/n] " -n 1 -r
-                echo ""
-                if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-                    sleep 3
-                    ACCOUNTS=$(curl -s "http://127.0.0.1:8080/v1/accounts" 2>/dev/null)
-                    if echo "$ACCOUNTS" | grep -q "+"; then
-                        LINKED_NUMBER=$(echo "$ACCOUNTS" | grep -o '+[0-9]*' | head -1)
-                        echo -e "  ${GREEN}✓${NC} Device linked: $LINKED_NUMBER"
-                        if [ "$LINKED_NUMBER" != "$PHONE_NUMBER" ] && [ -n "$LINKED_NUMBER" ]; then
-                            sed_inplace "s/$PHONE_NUMBER/$LINKED_NUMBER/" "$SETTINGS_FILE" 2>/dev/null || true
-                        fi
-                        SIGNAL_PAIRED=true
-                    else
-                        echo -e "  ${YELLOW}Still not verified. You can pair later via:${NC}"
-                        echo -e "    ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
-                    fi
-                fi
-            fi
+        # --- Device linking ---
+        echo -e "  ${GREEN}Link your phone to sidechannel:${NC}"
+        echo ""
+        echo "    1. Open this URL in your browser to see the QR code:"
+        echo ""
+        if [ "$REMOTE_MODE" = true ]; then
+            SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+            [ -z "$SERVER_IP" ] && SERVER_IP=$(ipconfig getifaddr en0 2>/dev/null || echo "<your-server-ip>")
+            echo -e "       ${CYAN}http://${SERVER_IP}:8080/v1/qrcodelink?device_name=sidechannel${NC}"
         else
-            echo ""
-            echo -e "  ${YELLOW}Signal bridge is taking too long to initialize.${NC}"
-            echo ""
-            echo "  This can happen on first run. Try these troubleshooting steps:"
-            echo "    1. Check container logs: docker logs signal-api"
-            echo "    2. Restart the container: docker restart signal-api"
-            echo "    3. Wait a minute, then open in browser:"
             echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
+        fi
+        echo ""
+        echo "    2. Open Signal on your phone"
+        echo "    3. Settings > Linked Devices > Link New Device"
+        echo "    4. Scan the QR code from your browser"
+        echo ""
+        flush_stdin
+        read -p "  Press Enter after scanning the QR code..."
+
+        echo ""
+        echo -e "  Verifying link..."
+        sleep 3
+
+        ACCOUNTS=$(curl -s "http://127.0.0.1:8080/v1/accounts" 2>/dev/null)
+        if echo "$ACCOUNTS" | grep -q "+"; then
+            LINKED_NUMBER=$(echo "$ACCOUNTS" | grep -o '+[0-9]*' | head -1)
+            echo -e "  ${GREEN}✓${NC} Device linked: $LINKED_NUMBER"
+
+            if [ "$LINKED_NUMBER" != "$PHONE_NUMBER" ] && [ -n "$LINKED_NUMBER" ]; then
+                sed_inplace "s/$PHONE_NUMBER/$LINKED_NUMBER/" "$SETTINGS_FILE" 2>/dev/null || true
+            fi
+            SIGNAL_PAIRED=true
+        else
+            echo -e "  ${YELLOW}Could not verify link.${NC}"
+            echo -e "  Check: ${CYAN}http://127.0.0.1:8080/v1/accounts${NC}"
             echo ""
-            echo "  The install will continue — you can pair later."
-
-            # Lock down to localhost if remote mode was used
-            if [ "$REMOTE_MODE" = true ]; then
-                echo -e "  Securing Signal bridge to localhost..."
-                docker stop signal-api 2>/dev/null || true
-                docker rm signal-api 2>/dev/null || true
-
-                docker run -d \
-                    --name signal-api \
-                    --restart unless-stopped \
-                    -p 127.0.0.1:8080:8080 \
-                    -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
-                    -e MODE=native \
-                    bbernhard/signal-cli-rest-api:latest
-
+            echo "  You may need to wait a moment and try scanning again."
+            flush_stdin
+            read -p "  Retry verification? [Y/n] " -n 1 -r
+            echo ""
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
                 sleep 3
-                if docker ps | grep -q signal-api; then
-                    echo -e "  ${GREEN}✓${NC} Signal bridge secured (localhost only)"
+                ACCOUNTS=$(curl -s "http://127.0.0.1:8080/v1/accounts" 2>/dev/null)
+                if echo "$ACCOUNTS" | grep -q "+"; then
+                    LINKED_NUMBER=$(echo "$ACCOUNTS" | grep -o '+[0-9]*' | head -1)
+                    echo -e "  ${GREEN}✓${NC} Device linked: $LINKED_NUMBER"
+                    if [ "$LINKED_NUMBER" != "$PHONE_NUMBER" ] && [ -n "$LINKED_NUMBER" ]; then
+                        sed_inplace "s/$PHONE_NUMBER/$LINKED_NUMBER/" "$SETTINGS_FILE" 2>/dev/null || true
+                    fi
+                    SIGNAL_PAIRED=true
+                else
+                    echo -e "  ${YELLOW}Still not verified. You can pair later via:${NC}"
+                    echo -e "    ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
                 fi
+            fi
+        fi
+
+        # Lock down to localhost after pairing if remote mode was used
+        if [ "$REMOTE_MODE" = true ]; then
+            echo -e "  Securing Signal bridge to localhost..."
+            docker stop signal-api 2>/dev/null || true
+            docker rm signal-api 2>/dev/null || true
+
+            docker run -d \
+                --name signal-api \
+                --restart unless-stopped \
+                -p 127.0.0.1:8080:8080 \
+                -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
+                -e MODE=native \
+                bbernhard/signal-cli-rest-api:latest
+
+            sleep 3
+            if docker ps | grep -q signal-api; then
+                echo -e "  ${GREEN}✓${NC} Signal bridge secured (localhost only)"
+            fi
+        fi
+    else
+        echo ""
+        echo -e "  ${YELLOW}Signal bridge is taking too long to initialize.${NC}"
+        echo ""
+        echo "  This can happen on first run. Try these troubleshooting steps:"
+        echo "    1. Check container logs: docker logs signal-api"
+        echo "    2. Restart the container: docker restart signal-api"
+        echo "    3. Wait a minute, then open in browser:"
+        echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
+        echo ""
+        echo "  The install will continue — you can pair later."
+
+        # Lock down to localhost if remote mode was used
+        if [ "$REMOTE_MODE" = true ]; then
+            echo -e "  Securing Signal bridge to localhost..."
+            docker stop signal-api 2>/dev/null || true
+            docker rm signal-api 2>/dev/null || true
+
+            docker run -d \
+                --name signal-api \
+                --restart unless-stopped \
+                -p 127.0.0.1:8080:8080 \
+                -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
+                -e MODE=native \
+                bbernhard/signal-cli-rest-api:latest
+
+            sleep 3
+            if docker ps | grep -q signal-api; then
+                echo -e "  ${GREEN}✓${NC} Signal bridge secured (localhost only)"
             fi
         fi
     fi
