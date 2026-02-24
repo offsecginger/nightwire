@@ -347,6 +347,28 @@ class AutonomousLoop:
 
     async def _worker_wrapper(self, task: Task) -> None:
         """Wrapper for worker that handles semaphore and error recovery."""
+        from ..resource_guard import check_resources
+
+        # Check resources before acquiring semaphore slot
+        status = check_resources()
+        if not status.ok:
+            logger.warning(
+                "worker_resource_limit",
+                task_id=task.id,
+                reason=status.reason,
+                memory_percent=status.memory_percent,
+            )
+            # Re-queue the task instead of failing it
+            await self.db.update_task_status(
+                task.id, TaskStatus.QUEUED,
+                error_message=f"Deferred: {status.reason}",
+            )
+            await self._notify(
+                task.phone_number,
+                f"Task deferred (resources): {task.title}\n{status.reason}",
+            )
+            return
+
         async with self._worker_semaphore:
             await self._process_task(task)
 

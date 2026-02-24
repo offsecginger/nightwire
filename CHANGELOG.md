@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin loader allowlist (`plugin_allowlist` config option)
 - Security scan in quality gates (detects os.system, shell=True, eval, hardcoded keys, IP exfil)
 - Static analysis regression test (no shell=True or os.system in codebase)
+- Resource guard: checks memory/CPU before spawning parallel workers
+
+### Changed
+- psutil added as dependency for resource monitoring
 
 ### Security
 - Path validation enforced in `ClaudeRunner.set_project()`
