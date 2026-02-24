@@ -22,6 +22,49 @@ sed_inplace() {
     fi
 }
 
+# Wait for Signal bridge QR code endpoint to be ready.
+# signal-cli inside the container needs time to fully initialize —
+# /v1/about returns OK first, but qrcodelink may not work yet.
+# Returns 0 on success (LINK_URI is set), 1 on failure.
+wait_for_qrcode() {
+    local max_wait=${1:-90}
+    local elapsed=0
+    LINK_URI=""
+
+    echo -e "  Waiting for Signal bridge to initialize..."
+
+    while [ $elapsed -lt $max_wait ]; do
+        # Try to get the link URI from the QR code endpoint
+        local response
+        response=$(curl -sf "http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel" 2>/dev/null || true)
+
+        # Check if we got an actual sgnl:// URI (not an error response)
+        local uri
+        uri=$(echo "$response" | grep -o 'sgnl://[^"]*' 2>/dev/null || true)
+        if [ -n "$uri" ]; then
+            LINK_URI="$uri"
+            return 0
+        fi
+
+        # Also check if the response is a PNG image (QR code) — means endpoint works
+        # even if we can't extract the URI from binary data
+        local content_type
+        content_type=$(curl -sI "http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel" 2>/dev/null | grep -i "content-type" || true)
+        if echo "$content_type" | grep -qi "image/png"; then
+            # Endpoint works, QR code is available via browser even if we can't parse URI
+            LINK_URI=""
+            return 0
+        fi
+
+        sleep 3
+        elapsed=$((elapsed + 3))
+        printf "."
+    done
+
+    echo ""
+    return 1
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -457,21 +500,12 @@ EOF
             -e MODE=native \
             bbernhard/signal-cli-rest-api:0.80
 
-        echo -e "  Waiting for Signal bridge..."
-        TRIES=0
-        while [ $TRIES -lt 12 ]; do
-            if curl -s "http://127.0.0.1:8080/v1/about" &>/dev/null; then
-                break
-            fi
-            sleep 2
-            TRIES=$((TRIES + 1))
-        done
-
         if ! docker ps | grep -q signal-api; then
             echo -e "  ${RED}Signal bridge failed to start${NC}"
             docker logs signal-api 2>&1 | tail -5
-        else
-            echo -e "  ${GREEN}✓${NC} Signal bridge running"
+        elif wait_for_qrcode 90; then
+            echo ""
+            echo -e "  ${GREEN}✓${NC} Signal bridge ready"
             echo ""
             echo -e "  ${GREEN}Link your phone to sidechannel:${NC}"
             echo ""
@@ -479,8 +513,6 @@ EOF
             echo "    2. Settings > Linked Devices > Link New Device"
             echo "    3. Scan this QR code:"
             echo ""
-
-            LINK_URI=$(curl -s "http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel" 2>/dev/null | grep -o 'sgnl://[^"]*' 2>/dev/null || true)
 
             if command -v qrencode &> /dev/null && [ -n "$LINK_URI" ]; then
                 echo "$LINK_URI" | qrencode -t ANSIUTF8
@@ -504,6 +536,17 @@ EOF
             else
                 echo -e "  ${YELLOW}Could not verify link. Docker Compose will restart the bridge.${NC}"
             fi
+        else
+            echo ""
+            echo -e "  ${YELLOW}Signal bridge is taking too long to initialize.${NC}"
+            echo ""
+            echo "  This can happen on first run. Try these troubleshooting steps:"
+            echo "    1. Check container logs: docker logs signal-api"
+            echo "    2. Restart the container: docker restart signal-api"
+            echo "    3. Wait a minute, then open in browser:"
+            echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
+            echo ""
+            echo "  The install will continue — you can pair later."
         fi
 
         # Stop the linking container — docker compose will manage it
@@ -928,24 +971,14 @@ if [ "$SKIP_SIGNAL" = false ]; then
             -e MODE=native \
             bbernhard/signal-cli-rest-api:0.80
 
-        # Wait for container to be ready
-        echo -e "  Waiting for Signal bridge to start..."
-        TRIES=0
-        while [ $TRIES -lt 12 ]; do
-            if curl -s "http://127.0.0.1:8080/v1/about" &>/dev/null; then
-                break
-            fi
-            sleep 2
-            TRIES=$((TRIES + 1))
-        done
-
         if ! docker ps | grep -q signal-api; then
             echo -e "  ${RED}Signal bridge failed to start${NC}"
             docker logs signal-api 2>&1 | tail -5
             echo ""
             echo -e "  You can re-run the installer later to set up Signal."
-        else
-            echo -e "  ${GREEN}✓${NC} Signal bridge running"
+        elif wait_for_qrcode 90; then
+            echo ""
+            echo -e "  ${GREEN}✓${NC} Signal bridge ready"
             echo ""
 
             # --- Device linking ---
@@ -955,8 +988,6 @@ if [ "$SKIP_SIGNAL" = false ]; then
             echo "    2. Settings > Linked Devices > Link New Device"
             echo "    3. Scan this QR code:"
             echo ""
-
-            LINK_URI=$(curl -s "http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel" 2>/dev/null | grep -o 'sgnl://[^"]*' 2>/dev/null || true)
 
             if command -v qrencode &> /dev/null && [ -n "$LINK_URI" ]; then
                 echo "$LINK_URI" | qrencode -t ANSIUTF8
@@ -1017,6 +1048,17 @@ if [ "$SKIP_SIGNAL" = false ]; then
                     fi
                 fi
             fi
+        else
+            echo ""
+            echo -e "  ${YELLOW}Signal bridge is taking too long to initialize.${NC}"
+            echo ""
+            echo "  This can happen on first run. Try these troubleshooting steps:"
+            echo "    1. Check container logs: docker logs signal-api"
+            echo "    2. Restart the container: docker restart signal-api"
+            echo "    3. Wait a minute, then open in browser:"
+            echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
+            echo ""
+            echo "  The install will continue — you can pair later."
 
             # Lock down to localhost if remote mode was used
             if [ "$REMOTE_MODE" = true ]; then
