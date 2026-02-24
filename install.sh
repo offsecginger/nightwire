@@ -694,8 +694,19 @@ if [ "$SKIP_SIGNAL" = false ]; then
     fi
 
     # Start in native mode for QR code pairing
-    docker stop signal-api 2>/dev/null || true
-    docker rm signal-api 2>/dev/null || true
+    # Force-remove any existing signal-api container (--restart policy can race with stop/rm)
+    docker rm -f signal-api 2>/dev/null || true
+    sleep 1
+
+    # Also check if something else is holding port 8080
+    if docker ps --format '{{.Ports}}' 2>/dev/null | grep -q "0.0.0.0:8080\|127.0.0.1:8080"; then
+        BLOCKER=$(docker ps --format '{{.Names}}: {{.Ports}}' | grep ":8080" | head -1)
+        echo -e "  ${YELLOW}Port 8080 is in use by: $BLOCKER${NC}"
+        echo -e "  Stopping it..."
+        BLOCKER_NAME=$(echo "$BLOCKER" | cut -d: -f1)
+        docker rm -f "$BLOCKER_NAME" 2>/dev/null || true
+        sleep 1
+    fi
 
     docker run -d \
         --name signal-api \
@@ -797,8 +808,8 @@ if command -v docker &> /dev/null && docker info &> /dev/null; then
     echo -e "${BLUE}Starting Signal bridge...${NC}"
 
     mkdir -p "$SIGNAL_DATA_DIR"
-    docker stop signal-api 2>/dev/null || true
-    docker rm signal-api 2>/dev/null || true
+    docker rm -f signal-api 2>/dev/null || true
+    sleep 1
 
     docker run -d \
         --name signal-api \

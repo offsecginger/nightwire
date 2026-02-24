@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - IP detection fallback: replaced macOS-only `ipconfig getifaddr` with Linux-compatible `ip route`
 - Generated `run.sh` now has `set -e`, guards `.env` source, uses `exec`
 - Added `curl` prerequisite check to installer
+- Docker container restart race: use `docker rm -f` instead of stop+rm to prevent port conflicts from restart policy
 
 ## [1.3.0] - 2026-02-24
 
