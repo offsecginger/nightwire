@@ -49,7 +49,7 @@ class AutonomousCommands:
 
     async def _create_prd(self, phone: str, title: str) -> str:
         """Create a new PRD."""
-        project_name, _ = self.get_current_project()
+        project_name, _ = self.get_current_project(phone)
         if not project_name:
             return "No project selected. Use /select <project> first."
 
@@ -70,7 +70,7 @@ class AutonomousCommands:
 
     async def _list_prds(self, phone: str) -> str:
         """List PRDs for user."""
-        project_name, _ = self.get_current_project()
+        project_name, _ = self.get_current_project(phone)
         prds = await self.manager.list_prds(phone, project_name)
 
         if not prds:
@@ -323,7 +323,7 @@ Example:
         project_name = prd.project_name if prd else None
 
         if not project_name:
-            project_name, _ = self.get_current_project()
+            project_name, _ = self.get_current_project(phone)
         if not project_name:
             return "No project found. Select a project first."
 
@@ -388,7 +388,7 @@ Example:
 
     async def handle_tasks(self, phone: str, args: str) -> str:
         """/tasks command handler - list tasks."""
-        project_name, _ = self.get_current_project()
+        project_name, _ = self.get_current_project(phone)
 
         status_filter = None
         if args.strip():
@@ -533,7 +533,7 @@ Example:
 
     async def _list_learnings(self, phone: str) -> str:
         """List recent learnings."""
-        project_name, _ = self.get_current_project()
+        project_name, _ = self.get_current_project(phone)
         learnings = await self.manager.get_learnings(
             phone_number=phone,
             project_name=project_name,
@@ -554,7 +554,7 @@ Example:
         if not query:
             return "Usage: /learnings search <query>"
 
-        project_name, _ = self.get_current_project()
+        project_name, _ = self.get_current_project(phone)
         learnings = await self.manager.search_learnings(
             phone_number=phone,
             query=query,
@@ -590,7 +590,7 @@ Example:
             valid = ", ".join(c.value for c in LearningCategory)
             return f"Invalid category. Use: {valid}"
 
-        project_name, _ = self.get_current_project()
+        project_name, _ = self.get_current_project(phone)
 
         learning_id = await self.manager.add_learning(
             phone_number=phone,

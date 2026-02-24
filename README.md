@@ -294,20 +294,22 @@ The memory system gives sidechannel persistent context across sessions. Conversa
 
 All code commands (`/ask`, `/do`, `/complex`) are powered by **Claude** via Claude CLI. Separately, you can enable a lightweight quick-response assistant backed by OpenAI (GPT-4o) or Grok for general knowledge questions that don't need project file access. This is optional — Claude handles all the real work.
 
-**How to use:**
+| Command | Description |
+|---------|-------------|
+| `/sidechannel <question>` | Ask the AI assistant anything |
+| `sidechannel <question>` | Same thing, without the slash |
+
+**Examples:**
 
 ```
-sidechannel: what is the difference between REST and GraphQL?
+/sidechannel what is the difference between REST and GraphQL?
   → Quick response comparing the two approaches
 
 sidechannel, explain kubernetes pods
   → Concise explanation of K8s pod concepts
 
-hey sidechannel what's the best way to handle JWT refresh tokens?
+sidechannel what's the best way to handle JWT refresh tokens?
   → Practical advice on token refresh patterns
-
-sidechannel
-  → Hello! How can I help you?
 ```
 
 The provider is auto-detected from your API keys. If only `OPENAI_API_KEY` is set, it uses OpenAI. If only `GROK_API_KEY` is set, it uses Grok. You can also set it explicitly in config.
@@ -383,7 +385,16 @@ projects:
   - name: backend
     path: /home/user/projects/backend-api
     description: "REST API service"
+
+  # Optional: restrict access to specific phone numbers
+  - name: private-project
+    path: /home/user/projects/private
+    description: "Restricted access"
+    allowed_numbers:
+      - "+15551234567"
 ```
+
+**Per-user project scoping:** Each phone number has its own active project selection, so multiple users can work on different projects simultaneously. Projects without `allowed_numbers` are visible to everyone. Projects with `allowed_numbers` are only shown in `/projects` and selectable via `/select` for listed numbers.
 
 ## Running
 

@@ -7,3 +7,12 @@ projects: []
   # - name: myproject
   #   path: /home/user/projects/myproject
   #   description: "My awesome project"
+  #
+  # Optional: restrict project access to specific phone numbers.
+  # If omitted, all authorized users can see and select the project.
+  # - name: private-project
+  #   path: /home/user/projects/private
+  #   description: "Restricted access project"
+  #   allowed_numbers:
+  #     - "+15551234567"
+  #     - "+15559876543"

@@ -127,9 +127,9 @@ class SignalBot:
         )
         self.autonomous_commands = AutonomousCommands(
             manager=self.autonomous_manager,
-            get_current_project=lambda: (
-                self.project_manager.current_project,
-                self.project_manager.current_path,
+            get_current_project=lambda phone: (
+                self.project_manager.get_current_project(phone),
+                self.project_manager.get_current_path(phone),
             ),
         )
 
@@ -249,18 +249,18 @@ class SignalBot:
             return self._get_help()
 
         elif command == "projects":
-            return self.project_manager.list_projects()
+            return self.project_manager.list_projects(sender)
 
         elif command == "select":
             if not args:
                 return "Usage: /select <project_name>"
-            success, msg = self.project_manager.select_project(args)
+            success, msg = self.project_manager.select_project(args, sender)
             if success:
-                self.runner.set_project(self.project_manager.current_path)
+                self.runner.set_project(self.project_manager.get_current_path(sender))
             return msg
 
         elif command == "status":
-            status = self.project_manager.get_status()
+            status = self.project_manager.get_status(sender)
             # Add running task info (direct /do tasks)
             if self._current_task and not self._current_task.done():
                 elapsed = ""
@@ -311,7 +311,7 @@ class SignalBot:
             if not args:
                 return "Usage: /remove <project_name>"
             success, msg = self.project_manager.remove_project(args)
-            if success and self.project_manager.current_project is None:
+            if success and self.project_manager.get_current_project(sender) is None:
                 self.runner.set_project(None)
             return msg
 
@@ -321,15 +321,15 @@ class SignalBot:
             parts = args.split(maxsplit=1)
             name = parts[0]
             desc = parts[1] if len(parts) > 1 else ""
-            success, msg = self.project_manager.create_project(name, desc)
+            success, msg = self.project_manager.create_project(name, sender, desc)
             if success:
-                self.runner.set_project(self.project_manager.current_path)
+                self.runner.set_project(self.project_manager.get_current_path(sender))
             return msg
 
         elif command == "ask":
             if not args:
                 return "Usage: /ask <question about the project>"
-            if not self.project_manager.current_project:
+            if not self.project_manager.get_current_project(sender):
                 return "No project selected. Use /select <project> first."
             busy = self._check_task_busy()
             if busy:
@@ -339,27 +339,27 @@ class SignalBot:
             self._start_background_task(
                 sender,
                 f"Answer this question about the codebase: {args}",
-                self.project_manager.current_project
+                self.project_manager.get_current_project(sender)
             )
             return None  # Response will be sent when task completes
 
         elif command == "do":
             if not args:
                 return "Usage: /do <task to perform>"
-            if not self.project_manager.current_project:
+            if not self.project_manager.get_current_project(sender):
                 return "No project selected. Use /select <project> first."
             busy = self._check_task_busy()
             if busy:
                 return busy
 
             await self._send_message(sender, "Working on it...")
-            self._start_background_task(sender, args, self.project_manager.current_project)
+            self._start_background_task(sender, args, self.project_manager.get_current_project(sender))
             return None  # Response will be sent when task completes
 
         elif command == "complex":
             if not args:
                 return "Usage: /complex <task>\nBreaks task into PRD with stories and autonomous tasks."
-            if not self.project_manager.current_project:
+            if not self.project_manager.get_current_project(sender):
                 return "No project selected. Use /select <project> first."
             busy = self._check_task_busy()
             if busy:
@@ -374,7 +374,7 @@ class SignalBot:
             return await self._cancel_current_task()
 
         elif command == "summary":
-            if not self.project_manager.current_project:
+            if not self.project_manager.get_current_project(sender):
                 return "No project selected. Use /select <project> first."
             busy = self._check_task_busy()
             if busy:
@@ -386,24 +386,24 @@ class SignalBot:
                 "Provide a comprehensive summary of this project including "
                 "its structure, main technologies used, and any recent changes "
                 "visible in git history.",
-                self.project_manager.current_project
+                self.project_manager.get_current_project(sender)
             )
             return None  # Response will be sent when task completes
 
         # Memory commands - use current project by default
         elif command == "remember":
             return await self.memory_commands.handle_remember(
-                sender, args, project=self.project_manager.current_project
+                sender, args, project=self.project_manager.get_current_project(sender)
             )
 
         elif command == "recall":
             return await self.memory_commands.handle_recall(
-                sender, args, project=self.project_manager.current_project
+                sender, args, project=self.project_manager.get_current_project(sender)
             )
 
         elif command == "history":
             return await self.memory_commands.handle_history(
-                sender, args, project=self.project_manager.current_project
+                sender, args, project=self.project_manager.get_current_project(sender)
             )
 
         elif command == "forget":
@@ -411,7 +411,7 @@ class SignalBot:
 
         elif command == "memories":
             return await self.memory_commands.handle_memories(
-                sender, args, project=self.project_manager.current_project
+                sender, args, project=self.project_manager.get_current_project(sender)
             )
 
         elif command == "preferences":
@@ -442,6 +442,13 @@ class SignalBot:
 
         elif command == "learnings":
             return await self.autonomous_commands.handle_learnings(sender, args)
+
+        elif command == "sidechannel":
+            if not self.sidechannel_runner:
+                return "sidechannel assistant is not enabled. Set sidechannel_assistant.enabled: true in settings.yaml and provide OPENAI_API_KEY or GROK_API_KEY."
+            if not args:
+                return "Usage: /sidechannel <question>\nAsk the AI assistant anything."
+            return await self._sidechannel_response(args)
 
         else:
             # Check plugin commands
@@ -491,7 +498,8 @@ Memory:
             help_text = """sidechannel Commands:
 
 AI Assistant:
-  sidechannel: <question> - Ask anything
+  /sidechannel <question> - Ask the AI assistant anything
+  Or just: sidechannel <question>
 
 """ + help_text[len("sidechannel Commands:\n\n"):]
 
@@ -517,7 +525,7 @@ AI Assistant:
             context = await self.memory.get_relevant_context(
                 phone_number=sender,
                 query=query,
-                project_name=self.project_manager.current_project,
+                project_name=self.project_manager.get_current_project(sender),
                 max_results=5,
                 max_tokens=self.config.memory_max_context_tokens
             )
@@ -673,8 +681,8 @@ AI Assistant:
 
         Uses Claude to intelligently break down the task into manageable pieces.
         """
-        project_name = self.project_manager.current_project
-        project_path = self.project_manager.current_path
+        project_name = self.project_manager.get_current_project(sender)
+        project_path = self.project_manager.get_current_path(sender)
 
         # Helper to update step and notify user
         async def update_step(step: str, notify: bool = True):
@@ -848,7 +856,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
             command_type = parts[0].lower()
 
         # Store incoming message (fire and forget, don't block)
-        project_name = self.project_manager.current_project
+        project_name = self.project_manager.get_current_project(sender)
         t = asyncio.create_task(
             self.memory.store_message(
                 phone_number=sender,
@@ -880,13 +888,13 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 response = await self._sidechannel_response(message)
             elif response is None:
                 # Treat non-command messages as /do commands if a project is selected
-                if self.project_manager.current_project:
+                if self.project_manager.get_current_project(sender):
                     busy = self._check_task_busy()
                     if busy:
                         response = busy
                     else:
                         await self._send_message(sender, "Working on it...")
-                        self._start_background_task(sender, message, self.project_manager.current_project)
+                        self._start_background_task(sender, message, self.project_manager.get_current_project(sender))
                         return  # Response will be sent when task completes
                 else:
                     response = "No project selected. Use /projects to list or /select <project> to choose one."
@@ -928,8 +936,16 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
         """Generate a sidechannel response using the configured provider."""
         if not self.sidechannel_runner:
             return "sidechannel assistant is not enabled. Set sidechannel_assistant.enabled: true in settings.yaml and provide OPENAI_API_KEY or GROK_API_KEY."
-        success, response = await self.sidechannel_runner.ask_jarvis(message)
-        return response
+        try:
+            logger.info("sidechannel_query", length=len(message))
+            success, response = await self.sidechannel_runner.ask_jarvis(message)
+            if not response or not response.strip():
+                logger.warning("sidechannel_empty_response")
+                return "The assistant returned an empty response. Please try again."
+            return response
+        except Exception as e:
+            logger.error("sidechannel_response_error", error=str(e), exc_type=type(e).__name__)
+            return "The assistant encountered an error. Please try again later."
 
     async def poll_messages(self):
         """Connect via WebSocket to receive messages (json-rpc mode)."""

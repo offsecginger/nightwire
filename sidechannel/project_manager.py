@@ -3,7 +3,7 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import structlog
 
@@ -14,16 +14,39 @@ logger = structlog.get_logger()
 
 
 class ProjectManager:
-    """Manages project selection and registration."""
+    """Manages project selection and registration with per-phone scoping."""
 
     def __init__(self):
         self.config = get_config()
-        self.current_project: Optional[str] = None
-        self.current_path: Optional[Path] = None
+        # Per-phone state: phone_number -> (project_name, project_path)
+        self._current_projects: Dict[str, Tuple[str, Path]] = {}
 
-    def list_projects(self) -> str:
-        """List all registered projects."""
-        projects = self.config.get_project_list()
+    def _can_access(self, project: dict, phone_number: Optional[str] = None) -> bool:
+        """Check if a phone number can access a project.
+
+        Projects without allowed_numbers are accessible to everyone.
+        """
+        allowed = project.get("allowed_numbers")
+        if not allowed:
+            return True
+        if phone_number is None:
+            return False
+        return phone_number in allowed
+
+    def get_current_project(self, phone_number: str) -> Optional[str]:
+        """Get the current project name for a phone number."""
+        entry = self._current_projects.get(phone_number)
+        return entry[0] if entry else None
+
+    def get_current_path(self, phone_number: str) -> Optional[Path]:
+        """Get the current project path for a phone number."""
+        entry = self._current_projects.get(phone_number)
+        return entry[1] if entry else None
+
+    def list_projects(self, phone_number: Optional[str] = None) -> str:
+        """List registered projects visible to this phone number."""
+        all_projects = self.config.get_project_list()
+        projects = [p for p in all_projects if self._can_access(p, phone_number)]
 
         if not projects:
             # Also list directories in projects base path
@@ -38,28 +61,31 @@ class ProjectManager:
                     )
             return "No projects registered. Use /add <name> to register a project."
 
+        current = self.get_current_project(phone_number) if phone_number else None
         lines = ["Registered projects:"]
         for p in projects:
-            marker = " *" if p["name"] == self.current_project else ""
+            marker = " *" if p["name"] == current else ""
             desc = f" - {p.get('description', '')}" if p.get('description') else ""
             lines.append(f"  {p['name']}{marker}{desc}")
 
-        if self.current_project:
+        if current:
             lines.append(f"\n* = currently selected")
 
         return "\n".join(lines)
 
-    def select_project(self, name: str) -> Tuple[bool, str]:
+    def select_project(self, name: str, phone_number: str) -> Tuple[bool, str]:
         """Select a project to work on."""
         name = name.strip().lower()
 
         # First check registered projects (case-insensitive)
         path = None
         matched_name = None
+        matched_project = None
         for p in self.config.get_project_list():
             if p["name"].lower() == name:
                 path = Path(p["path"])
                 matched_name = p["name"]
+                matched_project = p
                 break
 
         if path is None:
@@ -70,10 +96,17 @@ class ProjectManager:
                 self.config.add_project(name, str(potential_path))
                 path = potential_path
                 matched_name = name
+                matched_project = {"name": name, "path": str(potential_path)}
                 logger.info("project_auto_registered", name=name, path=str(path))
 
         if path is None:
             return False, f"Project '{name}' not found. Use /projects to see available projects."
+
+        # Check access control
+        if matched_project and not self._can_access(matched_project, phone_number):
+            logger.warning("project_access_denied", project=matched_name,
+                           phone="..." + phone_number[-4:])
+            return False, f"You don't have access to project '{matched_name}'."
 
         # Validate the path is allowed
         validated_path = validate_project_path(str(path))
@@ -83,16 +116,10 @@ class ProjectManager:
         if not validated_path.exists():
             return False, f"Project directory does not exist: {validated_path}"
 
-        self.current_project = matched_name
-        self.current_path = validated_path
+        self._current_projects[phone_number] = (matched_name, validated_path)
 
-        logger.info("project_selected", name=matched_name, path=str(validated_path))
-
-        # Get a brief summary of the project
-        files = list(validated_path.iterdir())[:10]
-        file_list = ", ".join(f.name for f in files)
-        if len(list(validated_path.iterdir())) > 10:
-            file_list += ", ..."
+        logger.info("project_selected", name=matched_name, path=str(validated_path),
+                     phone="..." + phone_number[-4:])
 
         return True, f"Selected: {matched_name}\nPath: {validated_path}"
 
@@ -137,14 +164,17 @@ class ProjectManager:
         self.config.remove_project(matched_name)
         logger.info("project_removed", name=matched_name)
 
-        # Clear selection if we just removed the active project
-        if self.current_project and self.current_project.lower() == name_lower:
-            self.current_project = None
-            self.current_path = None
+        # Clear selection for any user who had this project selected
+        to_remove = [
+            phone for phone, (proj, _) in self._current_projects.items()
+            if proj and proj.lower() == name_lower
+        ]
+        for phone in to_remove:
+            del self._current_projects[phone]
 
         return True, f"Removed project: {matched_name}"
 
-    def create_project(self, name: str, description: str = "") -> Tuple[bool, str]:
+    def create_project(self, name: str, phone_number: str, description: str = "") -> Tuple[bool, str]:
         """Create a new project directory and select it."""
         # Validate name with positive allowlist
         if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$', name) or len(name) > 64:
@@ -164,9 +194,8 @@ class ProjectManager:
             # Register it
             self.config.add_project(name, str(project_path), description)
 
-            # Select it
-            self.current_project = name
-            self.current_path = project_path
+            # Select it for this user
+            self._current_projects[phone_number] = (name, project_path)
 
             return True, f"Created and selected new project: {name}\nPath: {project_path}\n\nReady for Claude! Send a message describing what to build."
 
@@ -174,29 +203,32 @@ class ProjectManager:
             logger.error("project_create_error", name=name, error=str(e))
             return False, f"Failed to create project: {str(e)}"
 
-    def get_status(self) -> str:
-        """Get current project status."""
-        if self.current_project is None:
+    def get_status(self, phone_number: str) -> str:
+        """Get current project status for a phone number."""
+        current_project = self.get_current_project(phone_number)
+        current_path = self.get_current_path(phone_number)
+
+        if current_project is None:
             return "No project selected. Use /select <project> to select one."
 
         status = [
-            f"Current project: {self.current_project}",
-            f"Path: {self.current_path}"
+            f"Current project: {current_project}",
+            f"Path: {current_path}"
         ]
 
         # Add some project info
-        if self.current_path and self.current_path.exists():
+        if current_path and current_path.exists():
             # Check for common files
             markers = []
-            if (self.current_path / ".git").exists():
+            if (current_path / ".git").exists():
                 markers.append("git repo")
-            if (self.current_path / "package.json").exists():
+            if (current_path / "package.json").exists():
                 markers.append("Node.js")
-            if (self.current_path / "requirements.txt").exists():
+            if (current_path / "requirements.txt").exists():
                 markers.append("Python")
-            if (self.current_path / "Cargo.toml").exists():
+            if (current_path / "Cargo.toml").exists():
                 markers.append("Rust")
-            if (self.current_path / "go.mod").exists():
+            if (current_path / "go.mod").exists():
                 markers.append("Go")
 
             if markers:
@@ -204,7 +236,7 @@ class ProjectManager:
 
             # Count files
             try:
-                file_count = sum(1 for _ in self.current_path.rglob("*") if _.is_file())
+                file_count = sum(1 for _ in current_path.rglob("*") if _.is_file())
                 status.append(f"Files: ~{file_count}")
             except Exception:
                 pass

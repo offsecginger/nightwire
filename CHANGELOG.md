@@ -5,6 +5,18 @@ All notable changes to sidechannel will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-02-24
+
+### Added
+- `/sidechannel <question>` slash command for the AI assistant (previously only natural language prefix detection)
+- Per-phone-number project scoping — each user has their own active project selection
+- Optional `allowed_numbers` field in `projects.yaml` to restrict project access to specific phone numbers
+- `/help` now shows AI Assistant section with `/sidechannel` command when assistant is enabled
+
+### Fixed
+- Sidechannel assistant errors no longer silently swallowed — returns user-friendly error messages instead of silence
+- Empty sidechannel assistant responses now return a clear message instead of blank reply
+
 ## [1.4.0] - 2026-02-24
 
 ### Removed
