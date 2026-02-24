@@ -7,7 +7,7 @@
 
 services:
   signal-api:
-    image: bbernhard/signal-cli-rest-api:0.80
+    image: bbernhard/signal-cli-rest-api:latest
     container_name: signal-api
     restart: unless-stopped
     ports:

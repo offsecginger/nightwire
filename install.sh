@@ -559,7 +559,7 @@ EOF
             -p "$SIGNAL_BIND:8080:8080" \
             -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
             -e MODE=native \
-            bbernhard/signal-cli-rest-api:0.80
+            bbernhard/signal-cli-rest-api:latest
 
         if ! docker ps | grep -q signal-api; then
             echo -e "  ${RED}Signal bridge failed to start${NC}"
@@ -612,7 +612,7 @@ EOF
                     -p 127.0.0.1:8080:8080 \
                     -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
                     -e MODE=native \
-                    bbernhard/signal-cli-rest-api:0.80
+                    bbernhard/signal-cli-rest-api:latest
 
                 sleep 3
                 if docker ps | grep -q signal-api; then
@@ -1033,7 +1033,7 @@ if [ "$SKIP_SIGNAL" = false ]; then
             -p "$SIGNAL_BIND:8080:8080" \
             -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
             -e MODE=native \
-            bbernhard/signal-cli-rest-api:0.80
+            bbernhard/signal-cli-rest-api:latest
 
         if ! docker ps | grep -q signal-api; then
             echo -e "  ${RED}Signal bridge failed to start${NC}"
@@ -1126,7 +1126,7 @@ if [ "$SKIP_SIGNAL" = false ]; then
                     -p 127.0.0.1:8080:8080 \
                     -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
                     -e MODE=native \
-                    bbernhard/signal-cli-rest-api:0.80
+                    bbernhard/signal-cli-rest-api:latest
 
                 sleep 3
                 if docker ps | grep -q signal-api; then
