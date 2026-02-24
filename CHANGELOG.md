@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uninstaller now removes macOS launchd plist in addition to Linux systemd service
 - Buffered keystrokes during long installs no longer skip interactive prompts
 - Signal bridge QR code endpoint polled until actually ready (fixes "no data to encode" error)
+- Updated signal-cli-rest-api from pinned v0.80 to `latest` tag (v0.80 incompatible with current Signal protocol)
+- QR code readiness detection uses GET content-type instead of HEAD (API returns 404 for HEAD)
 - macOS-specific Docker start instructions (`open -a Docker` instead of `systemctl`)
 
 ## [1.2.0] - 2026-02-24
