@@ -871,6 +871,7 @@ EnvironmentFile=-$CONFIG_DIR/.env
 ExecStart=$VENV_DIR/bin/python3 -m sidechannel
 Restart=on-failure
 RestartSec=10
+RestartForceExitStatus=75
 
 [Install]
 WantedBy=default.target
