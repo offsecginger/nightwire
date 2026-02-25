@@ -1,4 +1,4 @@
-"""Main entry point for sidechannel."""
+"""Main entry point for nightwire."""
 
 import asyncio
 import logging
@@ -42,7 +42,7 @@ async def main():
     setup_logging()
     logger = structlog.get_logger()
 
-    logger.info("sidechannel_starting", version="1.5.0")
+    logger.info("nightwire_starting", version="1.5.0")
 
     # Import here to ensure logging is configured first
     from .config import get_config
@@ -83,7 +83,7 @@ async def main():
         raise
     finally:
         await bot.stop()
-        logger.info("sidechannel_stopped")
+        logger.info("nightwire_stopped")
 
 
 def run():

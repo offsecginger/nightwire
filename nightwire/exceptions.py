@@ -1,4 +1,4 @@
-"""Custom exception hierarchy for Sidechannel.
+"""Custom exception hierarchy for Nightwire.
 
 Provides precise error classification across all subsystems, enabling
 targeted error handling, retry decisions, and better debugging context.
@@ -19,7 +19,7 @@ class ErrorCategory(str, Enum):
 
 
 class SignalBotError(Exception):
-    """Base exception for all Sidechannel errors.
+    """Base exception for all Nightwire errors.
 
     All custom exceptions inherit from this, enabling broad catches
     when needed while still allowing precise handling per subsystem.
@@ -67,7 +67,8 @@ class SignalBotError(Exception):
         )
 
 
-# Backward-compatible alias — new name for the same base class
+# Backward-compatible aliases
+NightwireError = SignalBotError
 SidechannelError = SignalBotError
 
 
@@ -173,7 +174,7 @@ class TaskDependencyError(AutonomousTaskError):
 
 
 # ---------------------------------------------------------------------------
-# Claude / Sidechannel runner exceptions
+# Claude / Nightwire runner exceptions
 # ---------------------------------------------------------------------------
 
 class ClaudeRunnerError(SignalBotError):
@@ -198,8 +199,8 @@ class ClaudeRunnerError(SignalBotError):
         )
 
 
-class SidechannelRunnerError(SignalBotError):
-    """Error from the Sidechannel runner."""
+class NightwireRunnerError(SignalBotError):
+    """Error from the Nightwire runner."""
 
     def __init__(
         self,
@@ -210,8 +211,12 @@ class SidechannelRunnerError(SignalBotError):
         **context: Any,
     ) -> None:
         super().__init__(
-            message, category=category, module=module or "sidechannel_runner", **context
+            message, category=category, module=module or "nightwire_runner", **context
         )
+
+
+# Backward-compatible alias
+SidechannelRunnerError = NightwireRunnerError
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +322,7 @@ class SecurityError(SignalBotError):
 # ---------------------------------------------------------------------------
 
 class GrokRunnerError(SignalBotError):
-    """Error from the Grok/sidechannel AI assistant runner."""
+    """Error from the Grok/nightwire AI assistant runner."""
 
     def __init__(
         self,

@@ -1,4 +1,4 @@
-"""sidechannel AI assistant runner with configurable provider (OpenAI or Grok)."""
+"""nightwire AI assistant runner with configurable provider (OpenAI or Grok)."""
 
 import asyncio
 from typing import Optional, Tuple
@@ -15,8 +15,8 @@ OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 ALLOWED_API_HOSTS = {"api.openai.com", "api.x.ai"}
 
 
-class SidechannelRunner:
-    """Manages API execution for sidechannel AI assistant.
+class NightwireRunner:
+    """Manages API execution for nightwire AI assistant.
 
     Supports both OpenAI and Grok (X.AI) as backend providers.
     Both use the identical /v1/chat/completions schema.
@@ -45,7 +45,7 @@ class SidechannelRunner:
             raise ValueError("API URL must use HTTPS")
 
         if not self.api_key:
-            logger.warning("sidechannel_api_key_not_found")
+            logger.warning("nightwire_api_key_not_found")
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create a shared aiohttp session."""
@@ -65,7 +65,7 @@ class SidechannelRunner:
         timeout: int = 60,
     ) -> Tuple[bool, str]:
         """
-        Send a query to the configured provider as sidechannel AI assistant.
+        Send a query to the configured provider as nightwire AI assistant.
 
         Args:
             message: The user's message
@@ -75,20 +75,21 @@ class SidechannelRunner:
             Tuple of (success, response)
         """
         if not self.api_key:
-            return False, "sidechannel assistant is not configured. Set OPENAI_API_KEY or GROK_API_KEY in your .env file."
+            return False, "nightwire assistant is not configured. Set OPENAI_API_KEY or GROK_API_KEY in your .env file."
 
-        # Clean the message - remove sidechannel prefix variations
+        # Clean the message - remove nightwire/sidechannel prefix variations
         clean_message = message.strip()
         msg_lower = clean_message.lower()
-        for variant in ["sidechannel:", "sidechannel,", "sidechannel ", "hey sidechannel ", "hi sidechannel ", "ok sidechannel "]:
+        for variant in ["nightwire:", "nightwire,", "nightwire ", "hey nightwire ", "hi nightwire ", "ok nightwire ",
+                         "sidechannel:", "sidechannel,", "sidechannel ", "hey sidechannel ", "hi sidechannel ", "ok sidechannel "]:
             if msg_lower.startswith(variant):
                 clean_message = clean_message[len(variant):].strip()
                 break
 
-        if clean_message.lower() == "sidechannel" or not clean_message:
+        if clean_message.lower() in ("nightwire", "sidechannel") or not clean_message:
             clean_message = "Hello, how can you help me?"
 
-        system_prompt = """You are sidechannel, an intelligent AI development assistant integrated into a Signal messaging bot.
+        system_prompt = """You are nightwire, an intelligent AI development assistant integrated into a Signal messaging bot.
 
 Personality:
 - Professional yet friendly
@@ -141,13 +142,13 @@ Response Style:
                     data = await resp.json()
                     choices = data.get("choices")
                     if not choices or not isinstance(choices, list):
-                        logger.error("sidechannel_malformed_response", data_keys=list(data.keys()))
+                        logger.error("nightwire_malformed_response", data_keys=list(data.keys()))
                         return False, "Received an unexpected response from the AI provider. Please try again."
                     response = choices[0].get("message", {}).get("content", "")
                     if not response:
-                        logger.warning("sidechannel_empty_response")
+                        logger.warning("nightwire_empty_response")
                         return False, "The AI provider returned an empty response. Please try again."
-                    logger.info("sidechannel_response_success", length=len(response))
+                    logger.info("nightwire_response_success", length=len(response))
 
                     # Truncate if too long for Signal
                     if len(response) > 4000:
@@ -156,35 +157,43 @@ Response Style:
                     return True, response
                 else:
                     error_text = await resp.text()
-                    logger.error("sidechannel_api_error", status=resp.status, error=error_text[:500])
-                    return False, f"sidechannel encountered an error (status {resp.status}). Please try again."
+                    logger.error("nightwire_api_error", status=resp.status, error=error_text[:500])
+                    return False, f"nightwire encountered an error (status {resp.status}). Please try again."
 
         except asyncio.TimeoutError:
-            logger.warning("sidechannel_timeout", timeout=timeout)
+            logger.warning("nightwire_timeout", timeout=timeout)
             return False, "That query required more processing time than anticipated. Perhaps try a more specific question?"
 
         except Exception as e:
-            logger.error("sidechannel_exception", error=str(e))
+            logger.error("nightwire_exception", error=str(e))
             return False, "I'm experiencing a temporary issue. Please try again."
 
 
+# Backwards compat alias
+SidechannelRunner = NightwireRunner
+
+
 # Global instance
-_sidechannel_runner: Optional[SidechannelRunner] = None
+_nightwire_runner: Optional[NightwireRunner] = None
 
 
-def get_sidechannel_runner(
+def get_nightwire_runner(
     api_url: str = "",
     api_key: str = "",
     model: str = "",
     max_tokens: int = 1024,
-) -> SidechannelRunner:
-    """Get or create the global sidechannel runner instance."""
-    global _sidechannel_runner
-    if _sidechannel_runner is None:
-        _sidechannel_runner = SidechannelRunner(
+) -> NightwireRunner:
+    """Get or create the global nightwire runner instance."""
+    global _nightwire_runner
+    if _nightwire_runner is None:
+        _nightwire_runner = NightwireRunner(
             api_url=api_url,
             api_key=api_key,
             model=model,
             max_tokens=max_tokens,
         )
-    return _sidechannel_runner
+    return _nightwire_runner
+
+
+# Backwards compat alias
+get_sidechannel_runner = get_nightwire_runner

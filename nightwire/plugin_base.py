@@ -1,4 +1,4 @@
-"""Plugin base class and types for sidechannel extensibility."""
+"""Plugin base class and types for nightwire extensibility."""
 
 import os
 from dataclasses import dataclass, field
@@ -81,8 +81,8 @@ class PluginContext:
         await self._send_message(recipient, message)
 
 
-class SidechannelPlugin:
-    """Base class for all sidechannel plugins.
+class NightwirePlugin:
+    """Base class for all nightwire plugins.
 
     Subclass this and override the methods you need.
     Place your plugin in plugins/<name>/plugin.py.
@@ -120,3 +120,7 @@ class SidechannelPlugin:
     def help_sections(self) -> List[HelpSection]:
         """Return help text entries for the /help display."""
         return []
+
+
+# Backwards compat alias
+SidechannelPlugin = NightwirePlugin

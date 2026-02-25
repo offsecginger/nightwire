@@ -1,4 +1,4 @@
-"""Security module for sidechannel."""
+"""Security module for nightwire."""
 
 import asyncio
 import functools

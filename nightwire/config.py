@@ -1,4 +1,4 @@
-"""Configuration management for sidechannel."""
+"""Configuration management for nightwire."""
 
 import os
 import shutil
@@ -115,11 +115,11 @@ class Config:
             return str(home_local)
         return "claude"  # Hope it's in PATH
 
-    # sidechannel AI assistant configuration (supports OpenAI and Grok providers)
+    # nightwire AI assistant configuration (supports OpenAI and Grok providers)
     @property
-    def sidechannel_assistant_enabled(self) -> bool:
-        """Whether sidechannel AI assistant is enabled."""
-        sc_config = self.settings.get("sidechannel_assistant", {})
+    def nightwire_assistant_enabled(self) -> bool:
+        """Whether nightwire AI assistant is enabled."""
+        sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
         if sc_config.get("enabled") is not None:
             return sc_config.get("enabled", False)
         # Fallback to legacy nova / grok config
@@ -131,21 +131,21 @@ class Config:
 
     @property
     def grok_enabled(self) -> bool:
-        """Backward-compatible alias for sidechannel_assistant_enabled."""
-        return self.sidechannel_assistant_enabled
+        """Backward-compatible alias for nightwire_assistant_enabled."""
+        return self.nightwire_assistant_enabled
 
     @property
-    def sidechannel_assistant_provider(self) -> str:
+    def nightwire_assistant_provider(self) -> str:
         """Detect which provider to use: 'openai' or 'grok'.
 
         Priority:
-        1. Explicit sidechannel_assistant.provider setting
+        1. Explicit nightwire_assistant.provider setting
         2. Auto-detect from env: only OPENAI_API_KEY -> 'openai'
         3. Auto-detect from env: only GROK_API_KEY -> 'grok'
         4. Both keys present -> 'grok' (backward compat)
         5. Neither key -> 'grok' (will fail gracefully at call time)
         """
-        sc_config = self.settings.get("sidechannel_assistant", {})
+        sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
         explicit = sc_config.get("provider")
         if explicit:
             return explicit
@@ -164,16 +164,16 @@ class Config:
         return "grok"
 
     @property
-    def sidechannel_assistant_api_key(self) -> str:
+    def nightwire_assistant_api_key(self) -> str:
         """Return the API key for the active provider."""
-        if self.sidechannel_assistant_provider == "openai":
+        if self.nightwire_assistant_provider == "openai":
             return os.environ.get("OPENAI_API_KEY", "")
         return os.environ.get("GROK_API_KEY", "")
 
     @property
-    def sidechannel_assistant_api_url(self) -> str:
+    def nightwire_assistant_api_url(self) -> str:
         """Return the API URL for the active provider."""
-        sc_config = self.settings.get("sidechannel_assistant", {})
+        sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
         custom_url = sc_config.get("api_url")
         if custom_url:
             return custom_url
@@ -182,14 +182,14 @@ class Config:
         custom_url = nova_config.get("api_url")
         if custom_url:
             return custom_url
-        if self.sidechannel_assistant_provider == "openai":
+        if self.nightwire_assistant_provider == "openai":
             return "https://api.openai.com/v1/chat/completions"
         return "https://api.x.ai/v1/chat/completions"
 
     @property
-    def sidechannel_assistant_model(self) -> str:
+    def nightwire_assistant_model(self) -> str:
         """Return the model name for the active provider."""
-        sc_config = self.settings.get("sidechannel_assistant", {})
+        sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
         model = sc_config.get("model")
         if model:
             return model
@@ -203,15 +203,15 @@ class Config:
         if model:
             return model
         # Provider default
-        if self.sidechannel_assistant_provider == "openai":
+        if self.nightwire_assistant_provider == "openai":
             return "gpt-4o"
         return "grok-3-latest"
 
     @property
-    def sidechannel_assistant_max_tokens(self) -> int:
-        """Return max tokens for sidechannel assistant responses."""
+    def nightwire_assistant_max_tokens(self) -> int:
+        """Return max tokens for nightwire assistant responses."""
         default = 1024
-        for section in ("sidechannel_assistant", "nova", "grok"):
+        for section in ("nightwire_assistant", "sidechannel_assistant", "nova", "grok"):
             cfg = self.settings.get(section, {})
             val = cfg.get("max_tokens")
             if val is not None:

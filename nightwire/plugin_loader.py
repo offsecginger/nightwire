@@ -13,31 +13,33 @@ from .plugin_base import (
     CommandHandler,
     HelpSection,
     MessageMatcher,
+    NightwirePlugin,
     PluginContext,
     SidechannelPlugin,
 )
 
 logger = structlog.get_logger()
 
-# Register 'sidechannel' as a module alias so plugins can always
-# `from sidechannel.plugin_base import ...` even when the package
-# is deployed as 'signal_claude_bot' (via sync.sh).
+# Register 'nightwire' as the canonical module name and alias 'sidechannel'
+# for backwards compatibility, so plugins can use either
+# `from nightwire.plugin_base import ...` or `from sidechannel.plugin_base import ...`
 _parent_pkg = __name__.rsplit(".", 1)[0]
-if _parent_pkg != "sidechannel":
-    # Alias the top-level package
-    sys.modules["sidechannel"] = sys.modules[_parent_pkg]
-    # Also alias all already-imported submodules (e.g. plugin_base)
-    # so `from sidechannel.plugin_base import X` returns the same
-    # class objects as `from signal_claude_bot.plugin_base import X`.
+if _parent_pkg != "nightwire":
+    sys.modules["nightwire"] = sys.modules[_parent_pkg]
     _prefix = _parent_pkg + "."
     for _key, _mod in list(sys.modules.items()):
         if _key.startswith(_prefix):
-            _alias = "sidechannel" + _key[len(_parent_pkg):]
-            sys.modules[_alias] = _mod
+            sys.modules["nightwire" + _key[len(_parent_pkg):]] = _mod
+# Always alias 'sidechannel' -> current package for backwards compat
+sys.modules.setdefault("sidechannel", sys.modules[_parent_pkg])
+_prefix = _parent_pkg + "."
+for _key, _mod in list(sys.modules.items()):
+    if _key.startswith(_prefix):
+        sys.modules.setdefault("sidechannel" + _key[len(_parent_pkg):], _mod)
 
 
 class PluginLoader:
-    """Discovers, loads, and manages the lifecycle of sidechannel plugins."""
+    """Discovers, loads, and manages the lifecycle of nightwire plugins."""
 
     def __init__(
         self,
@@ -52,7 +54,7 @@ class PluginLoader:
         self._send_message = send_message
         self._allowed_numbers = allowed_numbers
         self._data_dir = data_dir
-        self.plugins: List[SidechannelPlugin] = []
+        self.plugins: List[NightwirePlugin] = []
         self._commands: Dict[str, CommandHandler] = {}
         self._matchers: List[MessageMatcher] = []
         self._help: List[HelpSection] = []
@@ -124,13 +126,13 @@ class PluginLoader:
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
 
-        # Find the SidechannelPlugin subclass
+        # Find the NightwirePlugin subclass
         plugin_cls = None
         for attr_name, attr in module.__dict__.items():
             if (
                 isinstance(attr, type)
-                and issubclass(attr, SidechannelPlugin)
-                and attr is not SidechannelPlugin
+                and issubclass(attr, NightwirePlugin)
+                and attr is not NightwirePlugin
             ):
                 plugin_cls = attr
                 break

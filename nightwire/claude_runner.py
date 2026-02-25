@@ -1,4 +1,4 @@
-"""Claude CLI runner for sidechannel."""
+"""Claude CLI runner for nightwire."""
 
 import asyncio
 import os

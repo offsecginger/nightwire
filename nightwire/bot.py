@@ -1,4 +1,4 @@
-"""Signal bot implementation for sidechannel."""
+"""Signal bot implementation for nightwire."""
 
 import asyncio
 import hashlib
@@ -43,24 +43,24 @@ class SignalBot:
         self.runner = get_runner()
         self.project_manager = get_project_manager()
 
-        # sidechannel assistant runner is optional (supports OpenAI and Grok providers)
-        self.sidechannel_runner = None
-        if self.config.sidechannel_assistant_enabled:
+        # nightwire assistant runner is optional (supports OpenAI and Grok providers)
+        self.nightwire_runner = None
+        if self.config.nightwire_assistant_enabled:
             try:
-                from .sidechannel_runner import SidechannelRunner
-                self.sidechannel_runner = SidechannelRunner(
-                    api_url=self.config.sidechannel_assistant_api_url,
-                    api_key=self.config.sidechannel_assistant_api_key,
-                    model=self.config.sidechannel_assistant_model,
-                    max_tokens=self.config.sidechannel_assistant_max_tokens,
+                from .nightwire_runner import NightwireRunner
+                self.nightwire_runner = NightwireRunner(
+                    api_url=self.config.nightwire_assistant_api_url,
+                    api_key=self.config.nightwire_assistant_api_key,
+                    model=self.config.nightwire_assistant_model,
+                    max_tokens=self.config.nightwire_assistant_max_tokens,
                 )
                 logger.info(
-                    "sidechannel_runner_initialized",
-                    provider=self.config.sidechannel_assistant_provider,
-                    model=self.config.sidechannel_assistant_model,
+                    "nightwire_runner_initialized",
+                    provider=self.config.nightwire_assistant_provider,
+                    model=self.config.nightwire_assistant_model,
                 )
             except Exception as e:
-                logger.warning("sidechannel_runner_unavailable", error=str(e))
+                logger.warning("nightwire_runner_unavailable", error=str(e))
 
         self.session: Optional[aiohttp.ClientSession] = None
         self.running = False
@@ -158,8 +158,8 @@ class SignalBot:
             await self.updater.stop()
         if self.autonomous_manager:
             await self.autonomous_manager.stop_loop()
-        if self.sidechannel_runner:
-            await self.sidechannel_runner.close()
+        if self.nightwire_runner:
+            await self.nightwire_runner.close()
         if self.session:
             await self.session.close()
         await self.runner.cancel()
@@ -231,8 +231,8 @@ class SignalBot:
             logger.warning("blocked_send_to_unauthorized", recipient="..." + recipient[-4:])
             return
 
-        # Add sidechannel identifier to all messages
-        message = f"[sidechannel] {message}"
+        # Add nightwire identifier to all messages
+        message = f"[nightwire] {message}"
 
         try:
             url = f"{self.config.signal_api_url}/v2/send"
@@ -458,12 +458,12 @@ class SignalBot:
         elif command == "learnings":
             return await self.autonomous_commands.handle_learnings(sender, args)
 
-        elif command == "sidechannel":
-            if not self.sidechannel_runner:
-                return "sidechannel assistant is not enabled. Set sidechannel_assistant.enabled: true in settings.yaml and provide OPENAI_API_KEY or GROK_API_KEY."
+        elif command in ("nightwire", "sidechannel"):
+            if not self.nightwire_runner:
+                return "nightwire assistant is not enabled. Set nightwire_assistant.enabled: true in settings.yaml and provide OPENAI_API_KEY or GROK_API_KEY."
             if not args:
-                return "Usage: /sidechannel <question>\nAsk the AI assistant anything."
-            return await self._sidechannel_response(args)
+                return "Usage: /nightwire <question>\nAsk the AI assistant anything."
+            return await self._nightwire_response(args)
 
         elif command == "update":
             # Only admin (first allowed number) can trigger updates
@@ -482,7 +482,7 @@ class SignalBot:
 
     def _get_help(self) -> str:
         """Get help text."""
-        help_text = """sidechannel Commands:
+        help_text = """nightwire Commands:
 
 Project Management:
   /projects - List available projects
@@ -522,14 +522,14 @@ Memory:
 System:
   /update - Apply a pending update (admin only)"""
 
-        if self.sidechannel_runner:
-            help_text = """sidechannel Commands:
+        if self.nightwire_runner:
+            help_text = """nightwire Commands:
 
 AI Assistant:
-  /sidechannel <question> - Ask the AI assistant anything
-  Or just: sidechannel <question>
+  /nightwire <question> - Ask the AI assistant anything
+  Or just: nightwire <question>
 
-""" + help_text[len("sidechannel Commands:\n\n"):]
+""" + help_text[len("nightwire Commands:\n\n"):]
 
         # Append plugin help sections
         for section in self.plugin_loader.get_all_help():
@@ -921,9 +921,9 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                     response = await matcher.handle_fn(sender, message)
                     break
 
-            if response is None and self._is_sidechannel_query(message):
-                # Addressed to sidechannel - general AI assistant mode
-                response = await self._sidechannel_response(message)
+            if response is None and self._is_nightwire_query(message):
+                # Addressed to nightwire - general AI assistant mode
+                response = await self._nightwire_response(message)
             elif response is None:
                 # Treat non-command messages as /do commands if a project is selected
                 if project_name:
@@ -956,33 +956,35 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
 
         await self._send_message(sender, response)
 
-    def _is_sidechannel_query(self, message: str) -> bool:
-        """Detect if a message is addressed to sidechannel assistant."""
-        if not self.sidechannel_runner:
+    def _is_nightwire_query(self, message: str) -> bool:
+        """Detect if a message is addressed to nightwire assistant."""
+        if not self.nightwire_runner:
             return False
         msg_lower = message.lower().strip()
-        # Match: "sidechannel:", "sidechannel,", "sidechannel " followed by text, or just "sidechannel"
-        if msg_lower.startswith("sidechannel:") or msg_lower.startswith("sidechannel,"):
-            return True
-        if msg_lower.startswith("sidechannel ") and len(msg_lower) > 12:
-            return True
-        if msg_lower == "sidechannel":
+        # Match: "nightwire:" / "sidechannel:" variants, followed by text, or just the name
+        for prefix in ("nightwire:", "nightwire,", "sidechannel:", "sidechannel,"):
+            if msg_lower.startswith(prefix):
+                return True
+        for prefix in ("nightwire ", "sidechannel "):
+            if msg_lower.startswith(prefix) and len(msg_lower) > len(prefix):
+                return True
+        if msg_lower in ("nightwire", "sidechannel"):
             return True
         return False
 
-    async def _sidechannel_response(self, message: str) -> str:
-        """Generate a sidechannel response using the configured provider."""
-        if not self.sidechannel_runner:
-            return "sidechannel assistant is not enabled. Set sidechannel_assistant.enabled: true in settings.yaml and provide OPENAI_API_KEY or GROK_API_KEY."
+    async def _nightwire_response(self, message: str) -> str:
+        """Generate a nightwire response using the configured provider."""
+        if not self.nightwire_runner:
+            return "nightwire assistant is not enabled. Set nightwire_assistant.enabled: true in settings.yaml and provide OPENAI_API_KEY or GROK_API_KEY."
         try:
-            logger.info("sidechannel_query", length=len(message))
-            success, response = await self.sidechannel_runner.ask_jarvis(message)
+            logger.info("nightwire_query", length=len(message))
+            success, response = await self.nightwire_runner.ask_jarvis(message)
             if not response or not response.strip():
-                logger.warning("sidechannel_empty_response")
+                logger.warning("nightwire_empty_response")
                 return "The assistant returned an empty response. Please try again."
             return response
         except Exception as e:
-            logger.error("sidechannel_response_error", error=str(e), exc_type=type(e).__name__)
+            logger.error("nightwire_response_error", error=str(e), exc_type=type(e).__name__)
             return "The assistant encountered an error. Please try again later."
 
     async def poll_messages(self):

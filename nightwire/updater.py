@@ -1,4 +1,4 @@
-"""Auto-update module for sidechannel."""
+"""Auto-update module for nightwire."""
 
 import asyncio
 import re
