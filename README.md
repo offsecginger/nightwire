@@ -35,6 +35,7 @@ Send `/complex Add user authentication with JWT tokens` and Nightwire will:
 
 **Production-Grade Reliability**
 - Transient errors (rate limits, timeouts) retried with exponential backoff
+- **Rate limit cooldown** — when Claude's subscription cap is hit, all operations pause automatically, you get a single Signal notification, and everything resumes after the cooldown expires
 - Stale tasks automatically recovered on restart
 - Circular dependency detection prevents deadlock
 - Git checkpoints before every task, atomic commits after
@@ -323,6 +324,43 @@ nightwire what's the best way to handle JWT refresh tokens?
 
 The provider is auto-detected from your API keys. If only `OPENAI_API_KEY` is set, it uses OpenAI. If only `GROK_API_KEY` is set, it uses Grok. You can also set it explicitly in config.
 
+### System
+
+| Command | Description |
+|---------|-------------|
+| `/cooldown` | Show current rate limit cooldown status |
+| `/cooldown clear` | Manually end an active cooldown and resume operations |
+| `/cooldown test` | Activate a 2-minute test cooldown (for verification) |
+| `/update` | Apply a pending update (admin only) |
+
+### Rate Limit Cooldown
+
+When Claude's subscription hits its daily or hourly usage cap, the CLI returns rate limit errors. Without intervention, the bot would burn through retries and spam you with individual failure notifications. The cooldown system detects this and handles it gracefully:
+
+1. **Detection** — Subscription-level errors (usage limit, daily limit, quota exceeded) immediately activate cooldown. Repeated transient rate-limit failures (3 within 5 minutes by default) also trigger cooldown
+2. **Pause** — All Claude operations (`/ask`, `/do`, `/complex`, and plain-text tasks) are blocked with a helpful message. The autonomous loop is automatically paused
+3. **Notify** — All authorized users receive a single Signal notification
+4. **Auto-resume** — After the cooldown period (default: 60 minutes), operations resume automatically and users are notified
+5. **Manual override** — `/cooldown clear` ends the cooldown early if you know the limit has reset
+
+**Examples:**
+
+```
+/cooldown
+  → No active cooldown. Claude operations are running normally.
+
+/cooldown test
+  → Test cooldown activated (2 minutes). Use /cooldown clear to cancel.
+
+/do Fix the login bug
+  → Claude is in cooldown mode (~45 min remaining). The account has hit
+    its rate limit. Commands will auto-resume when the cooldown expires,
+    or use /cooldown clear to override.
+
+/cooldown clear
+  → Cooldown cleared. Claude operations resumed.
+```
+
 ### Auto-Update
 
 Nightwire can check for updates automatically and notify you via Signal. Disabled by default.
@@ -381,6 +419,13 @@ autonomous:
 
 # Rate Limiting
 # Currently hardcoded to 30 requests per 60-second window per user.
+
+# Rate Limit Cooldown — pauses all Claude operations when subscription cap is hit
+# rate_limit_cooldown:
+#   enabled: true                    # Set false to disable cooldown entirely
+#   cooldown_minutes: 60             # How long to pause (default: 60 min)
+#   consecutive_threshold: 3         # Transient rate-limit failures before cooldown
+#   failure_window_seconds: 300      # Window for counting consecutive failures
 
 # Optional: nightwire AI assistant (supports OpenAI and Grok)
 nightwire_assistant:
