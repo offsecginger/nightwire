@@ -124,7 +124,7 @@ class Config:
             return str(home_local)
         return "claude"  # Hope it's in PATH
 
-    # nightwire AI assistant configuration (supports OpenAI and Grok providers)
+    # nightwire AI assistant configuration (any OpenAI-compatible provider)
     @property
     def nightwire_assistant_enabled(self) -> bool:
         """Whether nightwire AI assistant is enabled."""
@@ -145,8 +145,9 @@ class Config:
 
     @property
     def nightwire_assistant_provider(self) -> str:
-        """Detect which provider to use: 'openai' or 'grok'.
+        """Detect which provider to use.
 
+        Any string is valid — 'openai' and 'grok' have built-in presets.
         Priority:
         1. Explicit nightwire_assistant.provider setting
         2. Auto-detect from env: only OPENAI_API_KEY -> 'openai'
@@ -174,14 +175,37 @@ class Config:
 
     @property
     def nightwire_assistant_api_key(self) -> str:
-        """Return the API key for the active provider."""
-        if self.nightwire_assistant_provider == "openai":
+        """Return the API key for the active provider.
+
+        Priority:
+        1. Explicit api_key_env setting -> read that env var
+        2. provider == 'openai' -> OPENAI_API_KEY
+        3. provider == 'grok' -> GROK_API_KEY
+        4. Fallback: NIGHTWIRE_API_KEY env var
+        """
+        sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
+        api_key_env = sc_config.get("api_key_env")
+        if api_key_env:
+            key = os.environ.get(api_key_env, "")
+            if not key:
+                logger.warning("config_api_key_env_empty", env_var=api_key_env)
+            return key
+        provider = self.nightwire_assistant_provider
+        if provider == "openai":
             return os.environ.get("OPENAI_API_KEY", "")
-        return os.environ.get("GROK_API_KEY", "")
+        if provider == "grok":
+            return os.environ.get("GROK_API_KEY", "")
+        return os.environ.get("NIGHTWIRE_API_KEY", "")
 
     @property
     def nightwire_assistant_api_url(self) -> str:
-        """Return the API URL for the active provider."""
+        """Return the API URL for the active provider.
+
+        Priority:
+        1. Explicit api_url in config
+        2. Provider presets: openai/grok
+        3. No default for unknown providers (log warning)
+        """
         sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
         custom_url = sc_config.get("api_url")
         if custom_url:
@@ -191,13 +215,24 @@ class Config:
         custom_url = nova_config.get("api_url")
         if custom_url:
             return custom_url
-        if self.nightwire_assistant_provider == "openai":
+        provider = self.nightwire_assistant_provider
+        if provider == "openai":
             return "https://api.openai.com/v1/chat/completions"
-        return "https://api.x.ai/v1/chat/completions"
+        if provider == "grok":
+            return "https://api.x.ai/v1/chat/completions"
+        logger.warning("config_no_api_url_for_provider", provider=provider,
+                       hint="Set nightwire_assistant.api_url in settings.yaml")
+        return ""
 
     @property
     def nightwire_assistant_model(self) -> str:
-        """Return the model name for the active provider."""
+        """Return the model name for the active provider.
+
+        Priority:
+        1. Explicit model in config
+        2. Provider presets: openai -> gpt-4o, grok -> grok-3-latest
+        3. No default for unknown providers (log warning)
+        """
         sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
         model = sc_config.get("model")
         if model:
@@ -211,10 +246,15 @@ class Config:
         model = grok_config.get("model")
         if model:
             return model
-        # Provider default
-        if self.nightwire_assistant_provider == "openai":
+        # Provider presets
+        provider = self.nightwire_assistant_provider
+        if provider == "openai":
             return "gpt-4o"
-        return "grok-3-latest"
+        if provider == "grok":
+            return "grok-3-latest"
+        logger.warning("config_no_model_for_provider", provider=provider,
+                       hint="Set nightwire_assistant.model in settings.yaml")
+        return ""
 
     @property
     def nightwire_assistant_max_tokens(self) -> int:

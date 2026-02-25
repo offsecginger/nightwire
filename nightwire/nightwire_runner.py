@@ -1,4 +1,4 @@
-"""nightwire AI assistant runner with configurable provider (OpenAI or Grok)."""
+"""nightwire AI assistant runner for any OpenAI-compatible provider."""
 
 import asyncio
 from typing import Optional, Tuple
@@ -9,17 +9,11 @@ import structlog
 
 logger = structlog.get_logger()
 
-GROK_API_URL = "https://api.x.ai/v1/chat/completions"
-OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
-
-ALLOWED_API_HOSTS = {"api.openai.com", "api.x.ai"}
-
-
 class NightwireRunner:
     """Manages API execution for nightwire AI assistant.
 
-    Supports both OpenAI and Grok (X.AI) as backend providers.
-    Both use the identical /v1/chat/completions schema.
+    Supports any OpenAI-compatible provider via /v1/chat/completions.
+    OpenAI and Grok are available as built-in convenience presets.
     """
 
     def __init__(
@@ -35,14 +29,15 @@ class NightwireRunner:
         self.max_tokens = max_tokens
         self._session: Optional[aiohttp.ClientSession] = None
 
-        # Validate API URL domain and scheme
+        # Validate API URL scheme and hostname
         parsed = urlparse(self.api_url)
-        if parsed.hostname not in ALLOWED_API_HOSTS:
-            logger.warning("untrusted_api_url", url=self.api_url, host=parsed.hostname)
-            raise ValueError(f"Untrusted API URL: {parsed.hostname}. Allowed: {', '.join(ALLOWED_API_HOSTS)}")
         if parsed.scheme != "https":
             logger.warning("insecure_api_url", url=self.api_url)
             raise ValueError("API URL must use HTTPS")
+        if not parsed.hostname:
+            logger.warning("invalid_api_url", url=self.api_url)
+            raise ValueError("API URL must have a valid hostname")
+        logger.info("nightwire_api_configured", host=parsed.hostname)
 
         if not self.api_key:
             logger.warning("nightwire_api_key_not_found")
@@ -75,7 +70,7 @@ class NightwireRunner:
             Tuple of (success, response)
         """
         if not self.api_key:
-            return False, "nightwire assistant is not configured. Set OPENAI_API_KEY or GROK_API_KEY in your .env file."
+            return False, "nightwire assistant is not configured. Set the API key for your provider in .env (see api_key_env in settings.yaml)."
 
         # Clean the message - remove nightwire/sidechannel prefix variations
         clean_message = message.strip()

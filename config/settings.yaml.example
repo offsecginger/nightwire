@@ -47,12 +47,19 @@ autonomous:
 #   consecutive_threshold: 3         # Transient rate-limit failures before cooldown
 #   failure_window_seconds: 300      # Window for counting consecutive failures
 
-# Optional: nightwire AI assistant (supports OpenAI and Grok)
+# Optional: nightwire AI assistant (any OpenAI-compatible provider)
 nightwire_assistant:
   enabled: false
-  # provider: "openai"       # or "grok" — auto-detected from API keys if omitted
-  # model: "gpt-4o"          # Default: gpt-4o (OpenAI) or grok-3-latest (Grok)
+  # Built-in providers: "openai", "grok" (auto-detected from API keys if omitted)
+  # Or use any OpenAI-compatible provider with api_url + api_key_env + model
+  # provider: "openai"
+  # model: "gpt-4o"
   # max_tokens: 1024
+  #
+  # Custom provider example (any OpenAI-compatible API):
+  # api_url: "https://api.example.com/v1/chat/completions"
+  # api_key_env: "MY_PROVIDER_API_KEY"   # env var name holding your API key
+  # model: "model-name"
 
 # Legacy nova / grok config sections are still recognized for backward compatibility
 

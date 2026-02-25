@@ -302,7 +302,7 @@ The memory system gives Nightwire persistent context across sessions. Conversati
 
 ### Nightwire AI Assistant (Optional)
 
-All code commands (`/ask`, `/do`, `/complex`) are powered by **Claude** via Claude CLI. Separately, you can enable a lightweight quick-response assistant backed by OpenAI (GPT-4o) or Grok for general knowledge questions that don't need project file access. This is optional — Claude handles all the real work.
+All code commands (`/ask`, `/do`, `/complex`) are powered by **Claude** via Claude CLI. Separately, you can enable a lightweight quick-response assistant backed by any OpenAI-compatible API for general knowledge questions that don't need project file access. OpenAI and Grok are built-in presets, but you can point it at any provider (Morpheus, Ollama, LM Studio, etc.). This is optional — Claude handles all the real work.
 
 | Command | Description |
 |---------|-------------|
@@ -322,7 +322,17 @@ nightwire what's the best way to handle JWT refresh tokens?
   → Practical advice on token refresh patterns
 ```
 
-The provider is auto-detected from your API keys. If only `OPENAI_API_KEY` is set, it uses OpenAI. If only `GROK_API_KEY` is set, it uses Grok. You can also set it explicitly in config.
+**Built-in providers** are auto-detected from API keys: if only `OPENAI_API_KEY` is set, it uses OpenAI; if only `GROK_API_KEY`, it uses Grok. You can also set the provider explicitly in config.
+
+**Custom provider** — any OpenAI-compatible API works. Set `api_url`, `api_key_env`, and `model` in `settings.yaml`:
+
+```yaml
+nightwire_assistant:
+  enabled: true
+  api_url: "https://api.morpheus.example.com/v1/chat/completions"
+  api_key_env: "MORPHEUS_API_KEY"   # reads $MORPHEUS_API_KEY from .env
+  model: "morpheus-latest"
+```
 
 ### System
 
@@ -428,12 +438,16 @@ autonomous:
 #   consecutive_threshold: 3         # Transient rate-limit failures before cooldown
 #   failure_window_seconds: 300      # Window for counting consecutive failures
 
-# Optional: nightwire AI assistant (supports OpenAI and Grok)
+# Optional: nightwire AI assistant (any OpenAI-compatible provider)
 nightwire_assistant:
   enabled: false
-  # provider: "openai"       # or "grok" — auto-detected from API keys if omitted
-  # model: "gpt-4o"          # Default: gpt-4o (OpenAI) or grok-3-latest (Grok)
+  # Built-in providers: "openai", "grok" (auto-detected from API keys if omitted)
+  # Or use any OpenAI-compatible provider with api_url + api_key_env + model
+  # provider: "openai"
+  # model: "gpt-4o"
   # max_tokens: 1024
+  # api_url: "https://api.example.com/v1/chat/completions"
+  # api_key_env: "MY_PROVIDER_API_KEY"
 ```
 
 ### Claude CLI Authentication
@@ -450,6 +464,9 @@ claude login
 # Optional (for nightwire AI assistant) — set one or both
 OPENAI_API_KEY=sk-...
 GROK_API_KEY=xai-...
+
+# Generic: for any OpenAI-compatible provider (set api_key_env in settings.yaml)
+# NIGHTWIRE_API_KEY=your-key-here
 
 # Optional: Override Signal API URL (takes precedence over settings.yaml)
 # SIGNAL_API_URL=http://127.0.0.1:8080
