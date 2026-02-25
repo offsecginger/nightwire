@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# sidechannel installer
+# nightwire installer
 # Signal + Claude AI Bot
 #
 # Usage: ./install.sh [--skip-signal] [--skip-systemd] [--uninstall] [--restart]
@@ -30,7 +30,7 @@ sed_inplace() {
 wait_for_qrcode() {
     local max_wait=${1:-90}
     local elapsed=0
-    local qr_url="http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel"
+    local qr_url="http://127.0.0.1:8080/v1/qrcodelink?device_name=nightwire"
     QR_READY=false
 
     echo -ne "  Waiting for Signal bridge to initialize"
@@ -73,7 +73,7 @@ NC='\033[0m' # No Color
 
 # Configuration — default to the repo directory (where install.sh lives)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="${SIDECHANNEL_DIR:-$SCRIPT_DIR}"
+INSTALL_DIR="${NIGHTWIRE_DIR:-$SCRIPT_DIR}"
 VENV_DIR="$INSTALL_DIR/venv"
 CONFIG_DIR="$INSTALL_DIR/config"
 DATA_DIR="$INSTALL_DIR/data"
@@ -111,8 +111,8 @@ for arg in "$@"; do
             echo "Options:"
             echo "  --skip-signal    Skip Signal pairing (configure later)"
             echo "  --skip-systemd   Skip service installation"
-            echo "  --uninstall      Remove sidechannel service and containers"
-            echo "  --restart        Restart the sidechannel service"
+            echo "  --uninstall      Remove nightwire service and containers"
+            echo "  --restart        Restart the nightwire service"
             echo "  --help, -h       Show this help message"
             exit 0
             ;;
@@ -124,18 +124,18 @@ done
 # =============================================================================
 if [ "$UNINSTALL" = true ]; then
     echo ""
-    echo -e "${CYAN}sidechannel uninstaller${NC}"
+    echo -e "${CYAN}nightwire uninstaller${NC}"
     echo ""
 
     REMOVED_SOMETHING=false
 
     # --- Stop and disable systemd service (Linux) ---
     if [ "$(uname)" = "Linux" ] && command -v systemctl &> /dev/null; then
-        SERVICE_FILE="$HOME/.config/systemd/user/sidechannel.service"
-        if systemctl --user is-active sidechannel &> /dev/null || [ -f "$SERVICE_FILE" ]; then
+        SERVICE_FILE="$HOME/.config/systemd/user/nightwire.service"
+        if systemctl --user is-active nightwire &> /dev/null || [ -f "$SERVICE_FILE" ]; then
             echo -e "${BLUE}Removing systemd service...${NC}"
-            systemctl --user stop sidechannel 2>/dev/null || true
-            systemctl --user disable sidechannel 2>/dev/null || true
+            systemctl --user stop nightwire 2>/dev/null || true
+            systemctl --user disable nightwire 2>/dev/null || true
             rm -f "$SERVICE_FILE"
             systemctl --user daemon-reload
             echo -e "  ${GREEN}✓${NC} Service stopped and removed"
@@ -145,7 +145,7 @@ if [ "$UNINSTALL" = true ]; then
 
     # --- Stop and remove launchd service (macOS) ---
     if [ "$(uname)" = "Darwin" ]; then
-        PLIST_FILE="$HOME/Library/LaunchAgents/com.sidechannel.bot.plist"
+        PLIST_FILE="$HOME/Library/LaunchAgents/com.nightwire.bot.plist"
         if [ -f "$PLIST_FILE" ]; then
             echo -e "${BLUE}Removing launchd service...${NC}"
             launchctl unload "$PLIST_FILE" 2>/dev/null || true
@@ -156,9 +156,9 @@ if [ "$UNINSTALL" = true ]; then
     fi
 
     # --- Stop Docker containers ---
-    # Checks for legacy "sidechannel" container from older Docker installs
+    # Checks for legacy "nightwire" container from older Docker installs
     if command -v docker &> /dev/null; then
-        for CONTAINER in signal-api sidechannel; do
+        for CONTAINER in signal-api nightwire; do
             if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
                 echo -e "${BLUE}Stopping Docker container: ${CONTAINER}...${NC}"
                 docker stop "$CONTAINER" 2>/dev/null || true
@@ -191,12 +191,12 @@ if [ "$UNINSTALL" = true ]; then
 
     if [ "$REMOVED_SOMETHING" = true ]; then
         echo ""
-        echo -e "${GREEN}sidechannel has been uninstalled.${NC}"
+        echo -e "${GREEN}nightwire has been uninstalled.${NC}"
     else
         echo -e "${YELLOW}Nothing to uninstall.${NC} No service, containers, or install directory found."
         echo ""
         echo "  Expected install dir: $INSTALL_DIR"
-        echo "  Set SIDECHANNEL_DIR if installed elsewhere."
+        echo "  Set NIGHTWIRE_DIR if installed elsewhere."
     fi
     echo ""
     exit 0
@@ -207,21 +207,21 @@ fi
 # =============================================================================
 if [ "$RESTART" = true ]; then
     echo ""
-    echo -e "${CYAN}Restarting sidechannel...${NC}"
+    echo -e "${CYAN}Restarting nightwire...${NC}"
     echo ""
 
     RESTARTED=false
 
     # Linux: systemd
     if [ "$(uname)" = "Linux" ] && command -v systemctl &> /dev/null; then
-        if systemctl --user is-active sidechannel &> /dev/null || systemctl --user is-enabled sidechannel &> /dev/null; then
-            systemctl --user restart sidechannel
+        if systemctl --user is-active nightwire &> /dev/null || systemctl --user is-enabled nightwire &> /dev/null; then
+            systemctl --user restart nightwire
             sleep 2
-            if systemctl --user is-active sidechannel &>/dev/null; then
-                echo -e "  ${GREEN}✓${NC} sidechannel restarted (systemd)"
+            if systemctl --user is-active nightwire &>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} nightwire restarted (systemd)"
             else
                 echo -e "  ${YELLOW}!${NC} Restart issued but service not active yet"
-                echo -e "  Check: ${CYAN}journalctl --user -u sidechannel -f${NC}"
+                echo -e "  Check: ${CYAN}journalctl --user -u nightwire -f${NC}"
             fi
             RESTARTED=true
         fi
@@ -229,16 +229,16 @@ if [ "$RESTART" = true ]; then
 
     # macOS: launchd
     if [ "$(uname)" = "Darwin" ] && [ "$RESTARTED" = false ]; then
-        PLIST_FILE="$HOME/Library/LaunchAgents/com.sidechannel.bot.plist"
+        PLIST_FILE="$HOME/Library/LaunchAgents/com.nightwire.bot.plist"
         if [ -f "$PLIST_FILE" ]; then
             launchctl unload "$PLIST_FILE" 2>/dev/null || true
             launchctl load "$PLIST_FILE" 2>/dev/null
             sleep 2
-            if launchctl list | grep -q com.sidechannel.bot; then
-                echo -e "  ${GREEN}✓${NC} sidechannel restarted (launchd)"
+            if launchctl list | grep -q com.nightwire.bot; then
+                echo -e "  ${GREEN}✓${NC} nightwire restarted (launchd)"
             else
                 echo -e "  ${YELLOW}!${NC} Restart issued but service not running"
-                echo -e "  Check: ${CYAN}tail -f $LOGS_DIR/sidechannel.log${NC}"
+                echo -e "  Check: ${CYAN}tail -f $LOGS_DIR/nightwire.log${NC}"
             fi
             RESTARTED=true
         fi
@@ -257,16 +257,17 @@ fi
 VERSION="1.5.0"
 echo -e "${CYAN}"
 cat << 'EOF'
-     _     _           _                            _
- ___(_) __| | ___  ___| |__   __ _ _ __  _ __   ___| |
-/ __| |/ _` |/ _ \/ __| '_ \ / _` | '_ \| '_ \ / _ \ |
-\__ \ | (_| |  __/ (__| | | | (_| | | | | | | |  __/ |
-|___/_|\__,_|\___|\___|_| |_|\__,_|_| |_|_| |_|\___|_|
+       _       _     _            _
+ _ __ (_) __ _| |__ | |___      _(_)_ __ ___
+| '_ \| |/ _` | '_ \| __\ \ /\ / / | '__/ _ \
+| | | | | (_| | | | | |_ \ V  V /| | | |  __/
+|_| |_|_|\__, |_| |_|\__| \_/\_/ |_|_|  \___|
+         |___/
 
 EOF
 echo -e "${NC}"
 echo -e "  ${GREEN}Signal + Claude AI Bot${NC} — v${VERSION}"
-echo -e "  By ${CYAN}hackingdave${NC} — ${CYAN}https://github.com/hackingdave/sidechannel${NC}"
+echo -e "  By ${CYAN}hackingdave${NC} — ${CYAN}https://github.com/hackingdave/nightwire${NC}"
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -296,7 +297,7 @@ elif [ -f "$HOME/.local/bin/claude" ]; then
     echo -e "  ${GREEN}✓${NC} Claude CLI ($HOME/.local/bin/claude)"
 else
     echo -e "  ${YELLOW}!${NC} Claude CLI not found"
-    echo -e "    sidechannel requires Claude CLI for code commands (/ask, /do, /complex)."
+    echo -e "    nightwire requires Claude CLI for code commands (/ask, /do, /complex)."
     echo -e "    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${NC}"
     read -p "    Continue anyway? [y/N] " -n 1 -r
     echo
@@ -373,7 +374,7 @@ elif command -v docker &> /dev/null; then
 else
     echo -e "  ${YELLOW}!${NC} Docker not found"
     echo ""
-    echo "    sidechannel needs one small Docker container for Signal messaging."
+    echo "    nightwire needs one small Docker container for Signal messaging."
     echo ""
     if [ "$(uname)" = "Darwin" ]; then
         echo -e "    Install Docker Desktop: ${CYAN}https://docs.docker.com/desktop/install/mac-install/${NC}"
@@ -439,9 +440,9 @@ echo ""
 # -----------------------------------------------------------------------------
 echo -e "${BLUE}Setting up directories...${NC}"
 
-if [ ! -d "$INSTALL_DIR/sidechannel" ]; then
-    echo -e "${RED}Error: sidechannel package not found in $INSTALL_DIR${NC}"
-    echo "  Run this installer from the sidechannel repo directory."
+if [ ! -d "$INSTALL_DIR/nightwire" ]; then
+    echo -e "${RED}Error: nightwire package not found in $INSTALL_DIR${NC}"
+    echo "  Run this installer from the nightwire repo directory."
     exit 1
 fi
 
@@ -492,7 +493,7 @@ if [ ! -f "$SETTINGS_FILE" ]; then
         cp "$CONFIG_DIR/settings.yaml.example" "$SETTINGS_FILE"
     else
         cat > "$SETTINGS_FILE" << 'YAML'
-# sidechannel configuration
+# nightwire configuration
 
 # Phone numbers authorized to use the bot (E.164 format)
 allowed_numbers:
@@ -512,8 +513,8 @@ autonomous:
   poll_interval: 30
   quality_gates: true
 
-# Optional: sidechannel AI assistant (OpenAI or Grok)
-sidechannel_assistant:
+# Optional: nightwire AI assistant (OpenAI or Grok)
+nightwire_assistant:
   enabled: false
 YAML
     fi
@@ -541,20 +542,20 @@ fi
 ENV_FILE="$CONFIG_DIR/.env"
 if [ ! -f "$ENV_FILE" ]; then
     cat > "$ENV_FILE" << EOF
-# sidechannel environment variables
+# nightwire environment variables
 
-# Optional: OpenAI API key (for sidechannel AI assistant)
+# Optional: OpenAI API key (for nightwire AI assistant)
 # OPENAI_API_KEY=
 
-# Optional: Grok API key (for sidechannel AI assistant)
+# Optional: Grok API key (for nightwire AI assistant)
 # GROK_API_KEY=
 EOF
 fi
 
 # Optional AI assistant (not required — Claude handles all code tasks)
 echo ""
-echo -e "  ${BLUE}Optional:${NC} sidechannel can use OpenAI or Grok as a lightweight"
-echo "  assistant for general knowledge questions (\"sidechannel: what is X?\")."
+echo -e "  ${BLUE}Optional:${NC} nightwire can use OpenAI or Grok as a lightweight"
+echo "  assistant for general knowledge questions (\"nightwire: what is X?\")."
 echo "  This is NOT required — Claude handles all code commands (/ask, /do, /complex)."
 echo ""
 read -p "  Enable optional AI assistant? [y/N] " -n 1 -r
@@ -644,7 +645,7 @@ if [ -d "$PROJECTS_PATH" ]; then
             # Create projects.yaml with all subdirectories
             PROJECTS_FILE="$CONFIG_DIR/projects.yaml"
             cat > "$PROJECTS_FILE" << PROJEOF
-# sidechannel Projects Registry — auto-generated by installer
+# nightwire Projects Registry — auto-generated by installer
 projects:
 PROJEOF
             for d in "${SUBDIRS[@]}"; do
@@ -728,7 +729,7 @@ if [ "$SKIP_SIGNAL" = false ]; then
         echo ""
 
         # --- Device linking ---
-        echo -e "  ${GREEN}Link your phone to sidechannel:${NC}"
+        echo -e "  ${GREEN}Link your phone to nightwire:${NC}"
         echo ""
         echo "    1. Open this URL in your browser to see the QR code:"
         echo ""
@@ -737,9 +738,9 @@ if [ "$SKIP_SIGNAL" = false ]; then
             [ -z "$SERVER_IP" ] && SERVER_IP=$(ipconfig getifaddr en0 2>/dev/null)
             [ -z "$SERVER_IP" ] && SERVER_IP=$(ip route get 1 2>/dev/null | awk '{print $7; exit}')
             [ -z "$SERVER_IP" ] && SERVER_IP="<your-server-ip>"
-            echo -e "       ${CYAN}http://${SERVER_IP}:8080/v1/qrcodelink?device_name=sidechannel${NC}"
+            echo -e "       ${CYAN}http://${SERVER_IP}:8080/v1/qrcodelink?device_name=nightwire${NC}"
         else
-            echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
+            echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=nightwire${NC}"
         fi
         echo ""
         echo "    2. Open Signal on your phone"
@@ -782,7 +783,7 @@ if [ "$SKIP_SIGNAL" = false ]; then
                     SIGNAL_PAIRED=true
                 else
                     echo -e "  ${YELLOW}Still not verified. You can pair later via:${NC}"
-                    echo -e "    ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
+                    echo -e "    ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=nightwire${NC}"
                 fi
             fi
         fi
@@ -794,7 +795,7 @@ if [ "$SKIP_SIGNAL" = false ]; then
         echo "    1. Check container logs: docker logs signal-api"
         echo "    2. Restart the container: docker restart signal-api"
         echo "    3. Wait a minute, then open in browser:"
-        echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=sidechannel${NC}"
+        echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=nightwire${NC}"
         echo ""
         echo "  The install will continue — you can pair later."
     fi
@@ -842,7 +843,7 @@ set -e
 cd "$INSTALL_DIR" || exit 1
 source "$VENV_DIR/bin/activate"
 [ -f "$CONFIG_DIR/.env" ] && source "$CONFIG_DIR/.env"
-exec python3 -m sidechannel
+exec python3 -m nightwire
 EOF
 chmod +x "$RUN_SCRIPT"
 
@@ -851,16 +852,16 @@ if [ "$SKIP_SYSTEMD" = false ]; then
 
     if [ "$(uname)" = "Linux" ] && command -v systemctl &> /dev/null; then
         # --- Linux: systemd service ---
-        read -p "Start sidechannel as a service (auto-starts on boot)? [Y/n] " -n 1 -r
+        read -p "Start nightwire as a service (auto-starts on boot)? [Y/n] " -n 1 -r
         echo ""
 
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-            SERVICE_FILE="$HOME/.config/systemd/user/sidechannel.service"
+            SERVICE_FILE="$HOME/.config/systemd/user/nightwire.service"
             mkdir -p "$HOME/.config/systemd/user"
 
             cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=sidechannel - Signal Claude Bot
+Description=nightwire - Signal Claude Bot
 After=network.target docker.service
 
 [Service]
@@ -868,7 +869,7 @@ Type=simple
 WorkingDirectory=$INSTALL_DIR
 Environment="PATH=$VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=-$CONFIG_DIR/.env
-ExecStart=$VENV_DIR/bin/python3 -m sidechannel
+ExecStart=$VENV_DIR/bin/python3 -m nightwire
 Restart=on-failure
 RestartSec=10
 RestartForceExitStatus=75
@@ -878,32 +879,32 @@ WantedBy=default.target
 EOF
 
             systemctl --user daemon-reload
-            systemctl --user enable sidechannel
+            systemctl --user enable nightwire
             loginctl enable-linger "$USER" 2>/dev/null || true
 
             INSTALLED_SERVICE=true
             echo -e "  ${GREEN}✓${NC} Service installed and enabled"
 
             # Start it now
-            systemctl --user start sidechannel 2>/dev/null
+            systemctl --user start nightwire 2>/dev/null
             sleep 2
-            if systemctl --user is-active sidechannel &>/dev/null; then
-                echo -e "  ${GREEN}✓${NC} sidechannel is running!"
+            if systemctl --user is-active nightwire &>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} nightwire is running!"
                 STARTED_SERVICE=true
             else
                 echo -e "  ${YELLOW}Service installed but not started yet.${NC}"
-                echo -e "  Start with: ${CYAN}systemctl --user start sidechannel${NC}"
+                echo -e "  Start with: ${CYAN}systemctl --user start nightwire${NC}"
             fi
         fi
 
     elif [ "$(uname)" = "Darwin" ]; then
         # --- macOS: launchd plist ---
-        read -p "Start sidechannel as a service (auto-starts on login)? [Y/n] " -n 1 -r
+        read -p "Start nightwire as a service (auto-starts on login)? [Y/n] " -n 1 -r
         echo ""
 
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
             PLIST_DIR="$HOME/Library/LaunchAgents"
-            PLIST_FILE="$PLIST_DIR/com.sidechannel.bot.plist"
+            PLIST_FILE="$PLIST_DIR/com.nightwire.bot.plist"
             mkdir -p "$PLIST_DIR"
 
             cat > "$PLIST_FILE" << EOF
@@ -912,12 +913,12 @@ EOF
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.sidechannel.bot</string>
+    <string>com.nightwire.bot</string>
     <key>ProgramArguments</key>
     <array>
         <string>$VENV_DIR/bin/python</string>
         <string>-m</string>
-        <string>sidechannel</string>
+        <string>nightwire</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$INSTALL_DIR</string>
@@ -934,9 +935,9 @@ EOF
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>$LOGS_DIR/sidechannel.log</string>
+    <string>$LOGS_DIR/nightwire.log</string>
     <key>StandardErrorPath</key>
-    <string>$LOGS_DIR/sidechannel.err</string>
+    <string>$LOGS_DIR/nightwire.err</string>
 </dict>
 </plist>
 EOF
@@ -959,8 +960,8 @@ EOF
             launchctl load "$PLIST_FILE" 2>/dev/null
 
             sleep 2
-            if launchctl list | grep -q com.sidechannel.bot; then
-                echo -e "  ${GREEN}✓${NC} sidechannel is running!"
+            if launchctl list | grep -q com.nightwire.bot; then
+                echo -e "  ${GREEN}✓${NC} nightwire is running!"
                 STARTED_SERVICE=true
             else
                 echo -e "  ${YELLOW}Service installed but not started yet.${NC}"
@@ -977,24 +978,24 @@ echo ""
 if [ "$SIGNAL_PAIRED" = true ] && [ "$STARTED_SERVICE" = true ]; then
     # Everything worked — clean success
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║                  sidechannel is ready!                         ║${NC}"
+    echo -e "${GREEN}║                    nightwire is ready!                          ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  Send a message to ${CYAN}${LINKED_NUMBER:-your Signal number}${NC} to test!"
     echo -e "  Try: ${CYAN}/help${NC}"
     echo ""
     if [ "$(uname)" = "Linux" ]; then
-        echo -e "  View logs:  ${CYAN}journalctl --user -u sidechannel -f${NC}"
-        echo -e "  Stop:       ${CYAN}systemctl --user stop sidechannel${NC}"
-        echo -e "  Restart:    ${CYAN}systemctl --user restart sidechannel${NC}"
+        echo -e "  View logs:  ${CYAN}journalctl --user -u nightwire -f${NC}"
+        echo -e "  Stop:       ${CYAN}systemctl --user stop nightwire${NC}"
+        echo -e "  Restart:    ${CYAN}systemctl --user restart nightwire${NC}"
     elif [ "$(uname)" = "Darwin" ]; then
-        echo -e "  View logs:  ${CYAN}tail -f $LOGS_DIR/sidechannel.log${NC}"
-        echo -e "  Stop:       ${CYAN}launchctl unload ~/Library/LaunchAgents/com.sidechannel.bot.plist${NC}"
-        echo -e "  Restart:    ${CYAN}launchctl unload ~/Library/LaunchAgents/com.sidechannel.bot.plist && launchctl load ~/Library/LaunchAgents/com.sidechannel.bot.plist${NC}"
+        echo -e "  View logs:  ${CYAN}tail -f $LOGS_DIR/nightwire.log${NC}"
+        echo -e "  Stop:       ${CYAN}launchctl unload ~/Library/LaunchAgents/com.nightwire.bot.plist${NC}"
+        echo -e "  Restart:    ${CYAN}launchctl unload ~/Library/LaunchAgents/com.nightwire.bot.plist && launchctl load ~/Library/LaunchAgents/com.nightwire.bot.plist${NC}"
     fi
 else
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║              sidechannel installation complete!                ║${NC}"
+    echo -e "${GREEN}║              nightwire installation complete!                   ║${NC}"
     echo -e "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  Install dir: ${CYAN}$INSTALL_DIR${NC}"
@@ -1017,7 +1018,7 @@ else
 
     if [ "$STARTED_SERVICE" = false ]; then
         echo ""
-        echo -e "  $STEP. Start sidechannel: ${CYAN}$RUN_SCRIPT${NC}"
+        echo -e "  $STEP. Start nightwire: ${CYAN}$RUN_SCRIPT${NC}"
         STEP=$((STEP + 1))
     fi
 
@@ -1027,5 +1028,5 @@ fi
 
 echo ""
 echo -e "  Config:  ${CYAN}$CONFIG_DIR/settings.yaml${NC}"
-echo -e "  Docs:    ${CYAN}https://github.com/hackingdave/sidechannel${NC}"
+echo -e "  Docs:    ${CYAN}https://github.com/hackingdave/nightwire${NC}"
 echo ""
