@@ -1,6 +1,6 @@
-# sidechannel Plugins
+# nightwire Plugins
 
-Plugins extend sidechannel without modifying core code. Drop a plugin into the `plugins/` directory, restart the bot, and it's live.
+Plugins extend nightwire without modifying core code. Drop a plugin into the `plugins/` directory, restart the bot, and it's live.
 
 ## Quick Start
 
@@ -16,7 +16,7 @@ vim plugins/my_plugin/plugin.py
 # Edit config/settings.yaml, add plugins.my_plugin section
 
 # 4. Restart the bot
-systemctl --user restart sidechannel
+systemctl --user restart nightwire
 ```
 
 ## Plugin Structure
@@ -24,21 +24,21 @@ systemctl --user restart sidechannel
 ```
 plugins/my_plugin/
 ├── __init__.py        # Required (can be empty)
-├── plugin.py          # Required — your SidechannelPlugin subclass
+├── plugin.py          # Required — your NightwirePlugin subclass
 ├── helpers.py         # Optional — additional modules
 └── README.md          # Optional — documentation
 ```
 
-The plugin loader scans each subdirectory of `plugins/` for a `plugin.py` file, imports it, and finds the first `SidechannelPlugin` subclass.
+The plugin loader scans each subdirectory of `plugins/` for a `plugin.py` file, imports it, and finds the first `NightwirePlugin` subclass.
 
 ## Minimal Example
 
 ```python
 # plugins/hello_world/plugin.py
-from sidechannel.plugin_base import SidechannelPlugin, HelpSection
+from nightwire.plugin_base import NightwirePlugin, HelpSection
 
 
-class HelloWorldPlugin(SidechannelPlugin):
+class HelloWorldPlugin(NightwirePlugin):
     name = "hello_world"
     description = "A simple greeting plugin"
     version = "1.0.0"
@@ -63,10 +63,10 @@ class HelloWorldPlugin(SidechannelPlugin):
 
 ## Plugin Base Class
 
-All plugins inherit from `SidechannelPlugin`:
+All plugins inherit from `NightwirePlugin`:
 
 ```python
-class SidechannelPlugin:
+class NightwirePlugin:
     name: str = ""            # Unique plugin identifier
     description: str = ""     # One-line description
     version: str = "1.0.0"    # Semantic version
@@ -167,7 +167,7 @@ async def _handle_weather(self, sender: str, args: str) -> str:
 Intercept messages based on content, without requiring a `/command` prefix:
 
 ```python
-from sidechannel.plugin_base import MessageMatcher
+from nightwire.plugin_base import MessageMatcher
 
 def message_matchers(self):
     return [
@@ -190,7 +190,7 @@ async def _handle(self, sender: str, message: str) -> str:
 
 **Priority order:** When multiple plugins register matchers, they're sorted by priority. The first matcher where `match_fn` returns `True` handles the message — no further matchers or default routing are checked.
 
-**Routing order:** `/commands` are always checked before matchers. Matchers are checked before the sidechannel assistant and default `/do` routing.
+**Routing order:** `/commands` are always checked before matchers. Matchers are checked before the nightwire assistant and default `/do` routing.
 
 ## Lifecycle Hooks
 
@@ -200,7 +200,7 @@ Use `on_start()` and `on_stop()` for resource management:
 import asyncio
 import aiohttp
 
-class MyPlugin(SidechannelPlugin):
+class MyPlugin(NightwirePlugin):
     name = "my_plugin"
 
     def __init__(self, ctx):
@@ -313,7 +313,7 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 import pytest
-from sidechannel.plugin_base import PluginContext
+from nightwire.plugin_base import PluginContext
 
 @pytest.fixture(autouse=True)
 def _add_plugins_to_path():
