@@ -1,7 +1,7 @@
 """Tests for resource guard module."""
 
 import pytest
-from sidechannel.resource_guard import check_resources, ResourceStatus
+from nightwire.resource_guard import check_resources, ResourceStatus
 
 
 def test_check_resources_returns_status():

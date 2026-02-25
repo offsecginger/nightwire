@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 
-from sidechannel.autonomous.quality_gates import QualityGateRunner
+from nightwire.autonomous.quality_gates import QualityGateRunner
 
 
 @pytest.fixture

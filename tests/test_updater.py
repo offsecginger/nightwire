@@ -13,42 +13,42 @@ class TestAutoUpdateConfig:
     """Tests for auto_update configuration properties."""
 
     def test_auto_update_disabled_by_default(self):
-        from sidechannel.config import Config
+        from nightwire.config import Config
         with patch.object(Config, '__init__', lambda self, **kw: None):
             config = Config.__new__(Config)
             config.settings = {}
             assert config.auto_update_enabled is False
 
     def test_auto_update_enabled_from_settings(self):
-        from sidechannel.config import Config
+        from nightwire.config import Config
         with patch.object(Config, '__init__', lambda self, **kw: None):
             config = Config.__new__(Config)
             config.settings = {"auto_update": {"enabled": True}}
             assert config.auto_update_enabled is True
 
     def test_auto_update_check_interval_default(self):
-        from sidechannel.config import Config
+        from nightwire.config import Config
         with patch.object(Config, '__init__', lambda self, **kw: None):
             config = Config.__new__(Config)
             config.settings = {}
             assert config.auto_update_check_interval == 21600
 
     def test_auto_update_check_interval_from_settings(self):
-        from sidechannel.config import Config
+        from nightwire.config import Config
         with patch.object(Config, '__init__', lambda self, **kw: None):
             config = Config.__new__(Config)
             config.settings = {"auto_update": {"check_interval": 3600}}
             assert config.auto_update_check_interval == 3600
 
     def test_auto_update_branch_default(self):
-        from sidechannel.config import Config
+        from nightwire.config import Config
         with patch.object(Config, '__init__', lambda self, **kw: None):
             config = Config.__new__(Config)
             config.settings = {}
             assert config.auto_update_branch == "main"
 
     def test_auto_update_branch_from_settings(self):
-        from sidechannel.config import Config
+        from nightwire.config import Config
         with patch.object(Config, '__init__', lambda self, **kw: None):
             config = Config.__new__(Config)
             config.settings = {"auto_update": {"branch": "develop"}}
@@ -60,7 +60,7 @@ class TestAutoUpdater:
 
     def _make_updater(self, send_message=None, branch="main"):
         """Create an AutoUpdater with mocked dependencies."""
-        from sidechannel.updater import AutoUpdater
+        from nightwire.updater import AutoUpdater
         config = MagicMock()
         config.auto_update_enabled = True
         config.auto_update_check_interval = 21600
@@ -170,8 +170,8 @@ class TestAutoUpdater:
             return ""
         updater._run_git = fake_run_git
 
-        with patch("sidechannel.updater.subprocess.run") as mock_run, \
-             patch("sidechannel.updater.asyncio.create_task") as mock_create_task:
+        with patch("nightwire.updater.subprocess.run") as mock_run, \
+             patch("nightwire.updater.asyncio.create_task") as mock_create_task:
             mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             result = await updater.apply_update()
 
@@ -218,7 +218,7 @@ class TestAutoUpdater:
         updater._run_git = fake_run_git
         updater._rollback = AsyncMock()
 
-        with patch("sidechannel.updater.subprocess.run") as mock_run:
+        with patch("nightwire.updater.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="error", stdout="")
             result = await updater.apply_update()
 
@@ -247,7 +247,7 @@ class TestAutoUpdater:
         updater._run_git = fake_run_git
         updater._rollback = AsyncMock()
 
-        with patch("sidechannel.updater.subprocess.run") as mock_run:
+        with patch("nightwire.updater.subprocess.run") as mock_run:
             mock_run.side_effect = subprocess.TimeoutExpired(["pip"], 120)
             result = await updater.apply_update()
 
@@ -279,7 +279,7 @@ class TestAutoUpdater:
 
     def test_rejects_branch_starting_with_dash(self):
         """Branch names starting with - are rejected (git flag injection)."""
-        from sidechannel.updater import AutoUpdater
+        from nightwire.updater import AutoUpdater
         config = MagicMock()
         config.auto_update_branch = "--upload-pack=evil"
         config.allowed_numbers = ["+15551234567"]
@@ -290,7 +290,7 @@ class TestAutoUpdater:
 
     def test_accepts_valid_branch_names(self):
         """Valid branch names like feature/foo and release-1.0 are accepted."""
-        from sidechannel.updater import AutoUpdater
+        from nightwire.updater import AutoUpdater
         for branch in ["main", "develop", "feature/auto-update", "release-1.0",
                         "v2.0.0", "my_branch"]:
             config = MagicMock()

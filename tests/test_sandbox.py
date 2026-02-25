@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 
-from sidechannel.sandbox import build_sandbox_command, SandboxConfig
+from nightwire.sandbox import build_sandbox_command, SandboxConfig
 
 
 def test_build_sandbox_command_wraps_with_docker():

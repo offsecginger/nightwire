@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
 
-from sidechannel.plugin_loader import PluginLoader
+from nightwire.plugin_loader import PluginLoader
 
 
 def _make_loader(settings=None, plugins_dir=None):
@@ -38,8 +38,8 @@ def test_plugin_allowlist_allows_listed_plugin(tmp_path):
     plugin_dir = tmp_path / "safe_plugin"
     plugin_dir.mkdir()
     (plugin_dir / "plugin.py").write_text(
-        "from sidechannel.plugin_base import SidechannelPlugin\n"
-        "class SafePlugin(SidechannelPlugin):\n"
+        "from nightwire.plugin_base import NightwirePlugin\n"
+        "class SafePlugin(NightwirePlugin):\n"
         "    name = 'safe'\n"
         "    version = '1.0'\n"
     )
