@@ -38,6 +38,13 @@ autonomous:
 # Currently hardcoded to 30 requests per 60-second window per user.
 # Configurable rate limiting is planned for a future release.
 
+# Rate Limit Cooldown — pauses all Claude operations when subscription cap is hit
+# rate_limit_cooldown:
+#   enabled: true
+#   cooldown_minutes: 60             # How long to pause (default: 60 min)
+#   consecutive_threshold: 3         # Transient rate-limit failures before cooldown
+#   failure_window_seconds: 300      # Window for counting consecutive failures
+
 # Optional: nightwire AI assistant (supports OpenAI and Grok)
 nightwire_assistant:
   enabled: false

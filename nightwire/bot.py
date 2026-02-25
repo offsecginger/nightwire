@@ -21,6 +21,7 @@ from .memory import MemoryManager, MemoryCommands
 from .autonomous import AutonomousManager, AutonomousCommands
 from .plugin_loader import PluginLoader
 from .updater import AutoUpdater
+from .rate_limit_cooldown import get_cooldown_manager
 from .prd_builder import clean_json_string, extract_balanced_json, parse_prd_json
 
 logger = structlog.get_logger()
@@ -87,6 +88,9 @@ class SignalBot:
         # Auto-updater (initialized in start() if enabled)
         self.updater: Optional[AutoUpdater] = None
 
+        # Cooldown manager (initialized in start())
+        self.cooldown_manager = None
+
         # Plugin system
         plugins_data_dir = Path(self.config.config_dir).parent / "data" / "plugins"
         plugins_data_dir.mkdir(parents=True, exist_ok=True)
@@ -145,6 +149,39 @@ class SignalBot:
             )
             await self.updater.start()
 
+        # Initialize rate-limit cooldown manager
+        self.cooldown_manager = get_cooldown_manager()
+
+        async def _cooldown_on_activate():
+            """Pause autonomous loop and notify users on cooldown."""
+            if self.autonomous_manager:
+                await self.autonomous_manager.pause_loop()
+            state = self.cooldown_manager.get_state()
+            for phone in self.config.allowed_numbers:
+                try:
+                    await self._send_message(
+                        phone,
+                        f"Rate limit cooldown activated. {state.user_message}"
+                    )
+                except Exception as e:
+                    logger.warning("cooldown_notify_error", error=str(e))
+
+        async def _cooldown_on_deactivate():
+            """Resume autonomous loop and notify users when cooldown ends."""
+            if self.autonomous_manager:
+                await self.autonomous_manager.start_loop()
+            for phone in self.config.allowed_numbers:
+                try:
+                    await self._send_message(
+                        phone,
+                        "Rate limit cooldown expired. Claude operations resumed."
+                    )
+                except Exception as e:
+                    logger.warning("cooldown_notify_error", error=str(e))
+
+        self.cooldown_manager.on_activate(_cooldown_on_activate)
+        self.cooldown_manager.on_deactivate(_cooldown_on_deactivate)
+
         logger.info("bot_started", account=self.account)
 
     async def stop(self):
@@ -154,6 +191,8 @@ class SignalBot:
         self.running = False
         # Stop plugins
         await self.plugin_loader.stop_all()
+        if self.cooldown_manager:
+            self.cooldown_manager.cancel_timer()
         if self.updater:
             await self.updater.stop()
         if self.autonomous_manager:
@@ -307,6 +346,11 @@ class SignalBot:
             except Exception as e:
                 logger.warning("status_autonomous_error", error=str(e))
 
+            # Add cooldown info if active
+            if self.cooldown_manager and self.cooldown_manager.is_active:
+                state = self.cooldown_manager.get_state()
+                status += f"\n\nRate Limit Cooldown: Active (~{state.remaining_minutes} min remaining)"
+
             return status
 
         elif command == "add":
@@ -341,6 +385,8 @@ class SignalBot:
         elif command == "ask":
             if not args:
                 return "Usage: /ask <question about the project>"
+            if self.cooldown_manager and self.cooldown_manager.is_active:
+                return self.cooldown_manager.get_state().user_message
             current_project = self.project_manager.get_current_project(sender)
             if not current_project:
                 return "No project selected. Use /select <project> first."
@@ -359,6 +405,8 @@ class SignalBot:
         elif command == "do":
             if not args:
                 return "Usage: /do <task to perform>"
+            if self.cooldown_manager and self.cooldown_manager.is_active:
+                return self.cooldown_manager.get_state().user_message
             current_project = self.project_manager.get_current_project(sender)
             if not current_project:
                 return "No project selected. Use /select <project> first."
@@ -373,6 +421,8 @@ class SignalBot:
         elif command == "complex":
             if not args:
                 return "Usage: /complex <task>\nBreaks task into PRD with stories and autonomous tasks."
+            if self.cooldown_manager and self.cooldown_manager.is_active:
+                return self.cooldown_manager.get_state().user_message
             if not self.project_manager.get_current_project(sender):
                 return "No project selected. Use /select <project> first."
             busy = self._check_task_busy(sender)
@@ -473,12 +523,43 @@ class SignalBot:
                 return "Auto-update is not enabled. Set auto_update.enabled: true in settings.yaml."
             return await self.updater.apply_update()
 
+        elif command == "cooldown":
+            return await self._handle_cooldown_command(sender, args)
+
         else:
             # Check plugin commands
             plugin_handler = self.plugin_loader.get_all_commands().get(command)
             if plugin_handler:
                 return await plugin_handler(sender, args)
             return f"Unknown command: /{command}\nUse /help to see available commands."
+
+    async def _handle_cooldown_command(self, sender: str, args: str) -> str:
+        """Handle /cooldown [status|clear|test] command."""
+        if not self.cooldown_manager:
+            return "Cooldown manager not initialized."
+
+        subcommand = args.strip().lower() if args else "status"
+
+        if subcommand == "status":
+            state = self.cooldown_manager.get_state()
+            if state.active:
+                return f"Cooldown ACTIVE (~{state.remaining_minutes} min remaining)\n{state.user_message}"
+            return "No active cooldown. Claude operations are running normally."
+
+        elif subcommand == "clear":
+            if not self.cooldown_manager.is_active:
+                return "No active cooldown to clear."
+            self.cooldown_manager.deactivate()
+            return "Cooldown cleared. Claude operations resumed."
+
+        elif subcommand == "test":
+            if self.cooldown_manager.is_active:
+                return "Cooldown is already active. Use /cooldown clear first."
+            self.cooldown_manager.activate(cooldown_minutes=2)
+            return "Test cooldown activated (2 minutes). Use /cooldown clear to cancel."
+
+        else:
+            return "Usage: /cooldown [status|clear|test]"
 
     def _get_help(self) -> str:
         """Get help text."""
@@ -520,6 +601,7 @@ Memory:
         help_text += """
 
 System:
+  /cooldown [status|clear|test] - Rate limit cooldown info/control
   /update - Apply a pending update (admin only)"""
 
         if self.nightwire_runner:
@@ -926,7 +1008,9 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 response = await self._nightwire_response(message)
             elif response is None:
                 # Treat non-command messages as /do commands if a project is selected
-                if project_name:
+                if self.cooldown_manager and self.cooldown_manager.is_active:
+                    response = self.cooldown_manager.get_state().user_message
+                elif project_name:
                     busy = self._check_task_busy(sender)
                     if busy:
                         response = busy

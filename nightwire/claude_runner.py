@@ -26,6 +26,7 @@ class ErrorCategory(str, Enum):
     TRANSIENT = "transient"
     PERMANENT = "permanent"
     INFRASTRUCTURE = "infrastructure"
+    RATE_LIMITED = "rate_limited"
 
 
 def classify_error(return_code: int, output: str, error_text: str) -> ErrorCategory:
@@ -48,8 +49,16 @@ def classify_error(return_code: int, output: str, error_text: str) -> ErrorCateg
     if return_code == 127:  # Command not found
         return ErrorCategory.INFRASTRUCTURE
 
-    # Transient errors - worth retrying
+    # Rate limit errors - check for subscription-level patterns first
     if "rate limit" in combined or "429" in combined:
+        subscription_patterns = (
+            "usage limit", "daily limit", "capacity", "overloaded",
+            "too many requests", "try again later", "quota exceeded",
+            "hourly limit", "subscription",
+        )
+        for pattern in subscription_patterns:
+            if pattern in combined:
+                return ErrorCategory.RATE_LIMITED
         return ErrorCategory.TRANSIENT
     if "timeout" in combined or "timed out" in combined:
         return ErrorCategory.TRANSIENT
@@ -121,6 +130,13 @@ class ClaudeRunner:
         Returns:
             Tuple of (success, output)
         """
+        # Check cooldown before doing any work
+        from .rate_limit_cooldown import get_cooldown_manager
+        cooldown = get_cooldown_manager()
+        if cooldown.is_active:
+            state = cooldown.get_state()
+            return False, state.user_message
+
         effective_project = project_path or self.current_project
         if effective_project is None:
             return False, "No project selected. Use /select <project> first."
@@ -203,6 +219,15 @@ class ClaudeRunner:
 
             last_error = output
 
+            # Rate-limited errors activate cooldown immediately
+            if error_category == ErrorCategory.RATE_LIMITED:
+                logger.warning(
+                    "claude_rate_limited",
+                    error=output[:200],
+                )
+                cooldown.activate()
+                return False, cooldown.get_state().user_message
+
             # Decide whether to retry based on error classification
             if error_category != ErrorCategory.TRANSIENT:
                 logger.info(
@@ -211,6 +236,11 @@ class ClaudeRunner:
                     error=output[:200],
                 )
                 break
+
+        # If we exhausted retries on a transient rate-limit error,
+        # record it so consecutive failures can trigger cooldown
+        if "rate limit" in last_error.lower() or "429" in last_error.lower():
+            cooldown.record_rate_limit_failure()
 
         return False, last_error
 

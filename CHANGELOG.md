@@ -5,6 +5,16 @@ All notable changes to nightwire (formerly sidechannel) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-02-25
+
+### Added
+- Rate limit cooldown system — detects Claude subscription rate limits, pauses all operations, notifies users via Signal, and auto-resumes after configurable cooldown period
+- `/cooldown` command with `status`, `clear`, and `test` subcommands
+- `RATE_LIMITED` error category in Claude runner for subscription-level rate limit detection
+- `rate_limit_cooldown` configuration section in settings.yaml (enabled, cooldown_minutes, consecutive_threshold, failure_window_seconds)
+- Cooldown status displayed in `/status` output when active
+- Interactive `/ask`, `/do`, `/complex` commands and plain-text messages blocked with helpful message during cooldown
+
 ## [2.0.0] - 2026-02-25
 
 ### Changed
