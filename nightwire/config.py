@@ -514,6 +514,15 @@ class Config:
         return Path(self.config_dir).parent / "data" / "attachments"
 
     @property
+    def attachment_max_age_hours(self) -> int:
+        """Max age for attachment files in hours before cleanup deletes them.
+
+        Configurable via ``attachment_max_age_hours`` in settings.yaml.
+        Default 24. Set to 0 to disable automatic cleanup.
+        """
+        return int(self.settings.get("attachment_max_age_hours", 24))
+
+    @property
     def sandbox_enabled(self) -> bool:
         """Whether Docker sandbox is enabled for task execution."""
         sandbox_config = self.settings.get("sandbox", {})

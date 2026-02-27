@@ -27,7 +27,11 @@ from urllib.parse import urlparse
 import aiohttp
 import structlog
 
-from .attachments import SUPPORTED_IMAGE_TYPES, process_attachments
+from .attachments import (
+    SUPPORTED_IMAGE_TYPES,
+    cleanup_old_attachments,
+    process_attachments,
+)
 from .claude_runner import get_runner
 from .commands.base import BotContext, HandlerRegistry
 from .commands.core import CoreCommandHandler, get_memory_context
@@ -101,6 +105,7 @@ class SignalBot:
         self.running = False
         self.account: Optional[str] = None
         self._processed_messages = OrderedDict()  # Dedup: msg_hash -> timestamp
+        self._attachment_cleanup_task: Optional[asyncio.Task] = None
 
         # Memory system
         memory_db_path = Path(self.config.config_dir).parent / "data" / "memory.db"
@@ -261,6 +266,11 @@ class SignalBot:
         self.cooldown_manager.on_activate(_cooldown_on_activate)
         self.cooldown_manager.on_deactivate(_cooldown_on_deactivate)
 
+        # Start attachment cleanup loop
+        self._attachment_cleanup_task = asyncio.create_task(
+            self._attachment_cleanup_loop()
+        )
+
         # Update BotContext with deferred dependencies
         self._bot_context._autonomous_manager = self.autonomous_manager
         self._bot_context._autonomous_commands = self.autonomous_commands
@@ -303,6 +313,12 @@ class SignalBot:
             await self.autonomous_manager.stop_loop()
         if self.nightwire_runner:
             await self.nightwire_runner.close()
+        if self._attachment_cleanup_task and not self._attachment_cleanup_task.done():
+            self._attachment_cleanup_task.cancel()
+            try:
+                await self._attachment_cleanup_task
+            except asyncio.CancelledError:
+                pass
         # Cancel active Claude processes and background tasks BEFORE
         # closing session — tasks may need the session for final messages
         await self.runner.cancel()
@@ -313,6 +329,26 @@ class SignalBot:
         await self.runner.close()
         await self.memory.close()
         logger.info("bot_stopped")
+
+    async def _attachment_cleanup_loop(self):
+        """Periodically delete attachment files older than the configured TTL."""
+        while True:
+            try:
+                await asyncio.sleep(3600)  # Check every hour
+                max_age = self.config.attachment_max_age_hours
+                if max_age <= 0:
+                    continue
+                deleted = await asyncio.to_thread(
+                    cleanup_old_attachments,
+                    self.config.attachments_dir,
+                    max_age,
+                )
+                if deleted > 0:
+                    logger.info("attachments_cleaned", deleted=deleted)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("attachment_cleanup_error", error=str(e))
 
     async def _get_account(self):
         """Get the registered Signal account with retry."""

@@ -2,19 +2,23 @@
 
 Downloads, validates, and saves image attachments received via
 the Signal CLI REST API. Enforces size limits (50 MB), MIME type
-allowlisting, and SSRF-safe attachment ID validation.
+allowlisting, and SSRF-safe attachment ID validation. Provides
+TTL-based cleanup to prevent disk accumulation.
 
 Key functions:
     download_attachment: Fetch raw bytes from Signal API.
     save_attachment: Write bytes to disk with sender isolation.
     process_attachments: Batch download + save for a message.
+    cleanup_old_attachments: Delete files older than a TTL.
 
 Constants:
     SUPPORTED_IMAGE_TYPES: MIME types accepted for Claude vision.
     MAX_ATTACHMENT_SIZE: Hard cap on attachment download size.
 """
 
+import os
 import re
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -179,3 +183,53 @@ async def process_attachments(
             saved_images.append(file_path)
 
     return saved_images
+
+
+def cleanup_old_attachments(attachments_dir: Path, max_age_hours: int = 24) -> int:
+    """Delete attachment files older than *max_age_hours*.
+
+    Walks the two-level directory structure (``attachments_dir/<sender>/file``)
+    and removes files whose mtime exceeds the TTL. Empty sender subdirectories
+    are removed afterwards. This is a synchronous function — wrap in
+    ``asyncio.to_thread()`` when called from async code.
+
+    Args:
+        attachments_dir: Base directory containing sender sub-folders.
+        max_age_hours: Maximum file age in hours. Files older than this
+            are deleted. A value of 0 disables cleanup (returns 0).
+
+    Returns:
+        Number of files deleted.
+    """
+    if max_age_hours <= 0:
+        return 0
+    if not attachments_dir.exists():
+        return 0
+
+    cutoff = time.time() - (max_age_hours * 3600)
+    deleted = 0
+
+    for sender_dir in attachments_dir.iterdir():
+        if not sender_dir.is_dir():
+            continue
+        for file_path in sender_dir.iterdir():
+            if not file_path.is_file():
+                continue
+            try:
+                if os.stat(file_path).st_mtime < cutoff:
+                    file_path.unlink()
+                    deleted += 1
+            except OSError as exc:
+                logger.debug(
+                    "attachment_cleanup_skip",
+                    path=str(file_path),
+                    error=str(exc),
+                )
+        # Remove empty sender directory
+        try:
+            sender_dir.rmdir()  # Only succeeds if empty
+        except OSError:
+            pass  # Directory still has files — expected
+
+    logger.debug("attachment_cleanup_sweep", deleted=deleted)
+    return deleted
