@@ -1,4 +1,19 @@
-"""Learning extraction from completed tasks."""
+"""Learning extraction from completed tasks.
+
+Extracts reusable insights from task execution results using
+two strategies:
+
+1. **Structured extraction** (preferred): Uses Claude's
+   structured output with ``LearningExtraction`` schema to
+   extract categorized learnings with confidence scores.
+2. **Regex fallback**: Scans Claude output for marker patterns
+   (Note:, Warning:, Pattern:, etc.) and extracts learnings
+   from errors, quality gate failures, and successful patterns.
+
+Classes:
+    LearningExtractor: Extracts and categorizes learnings from
+        task execution results.
+"""
 
 import re
 from typing import List, Optional
@@ -6,17 +21,23 @@ from typing import List, Optional
 import structlog
 
 from .models import (
-    Task,
-    TaskExecutionResult,
     Learning,
     LearningCategory,
+    Task,
+    TaskExecutionResult,
 )
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.autonomous")
 
 
 class LearningExtractor:
-    """Extracts learnings from task execution results."""
+    """Extracts learnings from task execution results.
+
+    Supports both structured Claude extraction (preferred)
+    and regex-based extraction (fallback). Categorizes
+    learnings using keyword matching and assigns confidence
+    scores based on the extraction source.
+    """
 
     # Keywords that suggest different learning categories
     CATEGORY_KEYWORDS = {
@@ -88,16 +109,34 @@ class LearningExtractor:
 
     # Markers in Claude output that indicate learnings
     LEARNING_MARKERS = [
-        (r"(?:Note|Important|Remember|Tip|Insight):\s*(.+?)(?:\n\n|\Z)", LearningCategory.BEST_PRACTICE),
+        (
+            r"(?:Note|Important|Remember|Tip|Insight):\s*(.+?)(?:\n\n|\Z)",
+            LearningCategory.BEST_PRACTICE,
+        ),
         (r"(?:Pattern|Approach|Solution):\s*(.+?)(?:\n\n|\Z)", LearningCategory.PATTERN),
         (r"(?:Warning|Caution|Pitfall):\s*(.+?)(?:\n\n|\Z)", LearningCategory.PITFALL),
-        (r"(?:Learned|Discovery|Found):\s*(.+?)(?:\n\n|\Z)", LearningCategory.PROJECT_CONTEXT),
+        (
+            r"(?:Learned|Discovery|Found):\s*(.+?)(?:\n\n|\Z)",
+            LearningCategory.PROJECT_CONTEXT,
+        ),
     ]
 
     async def extract(
         self, task: Task, result: TaskExecutionResult
     ) -> List[Learning]:
-        """Extract learnings from a completed task."""
+        """Extract learnings from a completed task using regex.
+
+        Extracts pitfall learnings from failures, pattern
+        learnings from successful output, and testing learnings
+        from quality gate failures.
+
+        Args:
+            task: The executed task.
+            result: Execution result with output and errors.
+
+        Returns:
+            List of Learning models (may be empty).
+        """
         learnings = []
 
         # Extract from error messages (for pitfalls)
@@ -121,10 +160,111 @@ class LearningExtractor:
             "learnings_extracted",
             task_id=task.id,
             count=len(learnings),
-            categories=[l.category.value for l in learnings],
+            categories=[lg.category.value for lg in learnings],
         )
 
         return learnings
+
+    async def extract_with_claude(
+        self, task: Task, result: TaskExecutionResult, runner,
+    ) -> List[Learning]:
+        """Extract learnings using Claude structured output.
+
+        Falls back to ``extract()`` (regex) if the structured
+        call fails or output is too short (<100 chars).
+
+        Args:
+            task: The executed task.
+            result: Execution result with output and errors.
+            runner: ClaudeRunner instance for structured calls.
+
+        Returns:
+            List of Learning models (0-5 items).
+        """
+        from .models import LearningExtraction
+
+        if not result.claude_output or len(result.claude_output) < 100:
+            return await self.extract(task, result)
+
+        prompt = self._build_extraction_prompt(task, result)
+
+        try:
+            success, extraction = await runner.run_claude_structured(
+                prompt=prompt,
+                response_model=LearningExtraction,
+                timeout=60,
+                project_path=None,
+            )
+
+            if success and isinstance(extraction, LearningExtraction):
+                learnings = []
+                for ext in extraction.learnings[:5]:
+                    try:
+                        category = LearningCategory(ext.category)
+                    except ValueError:
+                        category = self.categorize_text(ext.content)
+
+                    learnings.append(Learning(
+                        phone_number=task.phone_number,
+                        project_name=task.project_name,
+                        task_id=task.id,
+                        category=category,
+                        title=ext.title,
+                        content=ext.content,
+                        relevance_keywords=(
+                            ext.relevance_keywords
+                            or self._extract_keywords(ext.content)
+                        ),
+                        confidence=ext.confidence,
+                    ))
+
+                logger.info(
+                    "learnings_extracted_structured",
+                    task_id=task.id, count=len(learnings),
+                )
+                return learnings
+        except Exception as e:
+            logger.warning(
+                "structured_learning_extraction_failed", error=str(e),
+            )
+
+        # Fallback: regex-based extraction
+        return await self.extract(task, result)
+
+    def _build_extraction_prompt(
+        self, task: Task, result: TaskExecutionResult,
+    ) -> str:
+        """Build prompt for Claude to extract learnings."""
+        output_preview = result.claude_output[:3000]
+        error_section = ""
+        if result.error_message:
+            error_section = (
+                f"\n\nError encountered:\n{result.error_message[:500]}"
+            )
+
+        qg_section = ""
+        if result.quality_gate and not result.quality_gate.passed:
+            qg_section = (
+                f"\n\nQuality gate: {result.quality_gate.tests_failed}"
+                " tests failed"
+            )
+
+        files = ", ".join(result.files_changed[:10]) if result.files_changed else "none"
+
+        return (
+            "Extract learnings from this completed task execution.\n\n"
+            f"Task: {task.title}\n"
+            f"Description: {task.description[:500]}\n"
+            f"Success: {result.success}\n"
+            f"Files changed: {files}"
+            f"{error_section}{qg_section}\n\n"
+            f"Output preview:\n{output_preview}\n\n"
+            "Extract 0-5 learnings. Categories: pattern, pitfall, "
+            "best_practice, project_context, debugging, architecture, "
+            "testing, tool_usage.\n"
+            "Only extract genuinely useful insights. "
+            "If nothing noteworthy, return empty list."
+        )
 
     def _extract_pitfall_learning(
         self, task: Task, result: TaskExecutionResult
@@ -282,7 +422,17 @@ class LearningExtractor:
         return title
 
     def categorize_text(self, text: str) -> LearningCategory:
-        """Determine the most appropriate category for text."""
+        """Determine the most appropriate category for text.
+
+        Counts keyword matches per category and returns the
+        highest-scoring one. Defaults to PROJECT_CONTEXT.
+
+        Args:
+            text: Text to categorize.
+
+        Returns:
+            Best-matching LearningCategory.
+        """
         text_lower = text.lower()
 
         # Count keyword matches per category

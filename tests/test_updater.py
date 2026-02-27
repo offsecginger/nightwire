@@ -1,12 +1,11 @@
 """Tests for auto-update feature."""
 
 import asyncio
-import re
 import subprocess
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
-from pathlib import Path
 
 
 class TestAutoUpdateConfig:

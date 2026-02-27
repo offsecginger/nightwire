@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 
 import structlog
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.plugins")
 
 
 @dataclass
@@ -86,7 +86,18 @@ def _parse_frontmatter(content: str) -> Dict[str, str]:
 
 
 class SkillRegistry:
-    """Discovers plugin skills/commands and matches them to prompts."""
+    """Discovers plugin skills/commands and matches them to prompts.
+
+    Scans plugin directories for SKILL.md and command .md files,
+    extracts keyword metadata, and scores prompts against those
+    keywords. Used to inject a skill catalog + recommendation
+    section into every Claude CLI invocation.
+
+    Args:
+        plugins_path: Root path containing plugins/ subdirectories.
+        config: Optional dict with exclude_skills, exclude_commands,
+            and suggest_commands lists.
+    """
 
     def __init__(self, plugins_path: Optional[Path] = None, config: Optional[dict] = None):
         self._plugins_path = plugins_path
@@ -107,7 +118,12 @@ class SkillRegistry:
     # ------------------------------------------------------------------
 
     def scan(self) -> None:
-        """Walk plugin directories and discover skills + commands."""
+        """Walk plugin directories and discover skills + commands.
+
+        Populates self._skills and self._commands from SKILL.md
+        and commands/*.md files under plugins_path. Respects
+        exclude_skills and exclude_commands config lists.
+        """
         if self._plugins_path is None or not self._plugins_path.is_dir():
             logger.warning("skill_registry_no_plugins_dir", path=str(self._plugins_path))
             return
@@ -219,7 +235,14 @@ class SkillRegistry:
     # ------------------------------------------------------------------
 
     def match_skills(self, prompt: str) -> List[SkillInfo]:
-        """Return skills matching the prompt, ordered by relevance score."""
+        """Return skills matching the prompt, ordered by relevance.
+
+        Args:
+            prompt: User's task prompt to match against.
+
+        Returns:
+            List of matching SkillInfo, highest score first.
+        """
         return self._match(prompt, self._skills)
 
     def match_commands(self, prompt: str) -> List[CommandInfo]:
@@ -257,9 +280,17 @@ class SkillRegistry:
     # ------------------------------------------------------------------
 
     def build_prompt_section(self, prompt: str) -> Optional[str]:
-        """Build the skill catalog + recommendation section for injection.
+        """Build the skill catalog + recommendation for injection.
 
-        Returns None if registry is empty or disabled.
+        Generates a markdown section listing all skills/commands
+        plus a targeted recommendation if a skill scores >= 2.
+
+        Args:
+            prompt: User's task prompt for relevance matching.
+
+        Returns:
+            Markdown string to inject into Claude prompt, or None
+            if the registry is empty.
         """
         if not self._skills and not self._commands:
             return None

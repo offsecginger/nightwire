@@ -1,10 +1,9 @@
 """Tests for verifier security prompt."""
 
-import pytest
 from unittest.mock import MagicMock
 
-from nightwire.autonomous.verifier import VerificationAgent
 from nightwire.autonomous.models import Task
+from nightwire.autonomous.verifier import VerificationAgent
 
 
 def test_verification_prompt_includes_security_questions():

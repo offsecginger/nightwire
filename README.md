@@ -15,7 +15,7 @@ Most AI coding tools require you to sit at your computer. Nightwire lets you man
 - **Delegate complex projects** - Describe what you want built, and Nightwire breaks it into a full PRD with stories and tasks, then executes them autonomously with parallel workers
 - **Never lose context** - Episodic memory with vector embeddings means Nightwire remembers your conversations, project preferences, and past decisions across sessions
 - **Trust the output** - Every autonomous task is independently verified by a separate Claude context using a fail-closed security model. Code that introduces security issues or logic errors is rejected automatically
-- **Powered by Claude** - All code analysis, generation, and autonomous tasks run through Claude (via Claude CLI). Optionally add OpenAI or Grok as lightweight quick-response assistants for general questions that don't need project access
+- **Powered by Claude** - All code analysis, generation, and autonomous tasks run through Claude Code CLI with structured JSON output, streaming, and full agentic capabilities. Works with Pro/Max subscriptions or API keys. Optionally add OpenAI or Grok as lightweight quick-response assistants
 - **Stay secure** - Phone number allowlist, end-to-end encryption via Signal, rate limiting, path validation hardening, and no message content logging
 
 ### Key Benefits
@@ -106,7 +106,7 @@ The installer supports flags for advanced usage:
 |---|---|
 | **Python 3.9+** | Required |
 | **Docker** | Required for Signal bridge container |
-| **Claude CLI** | Recommended (powers /ask, /do, /complex) |
+| **Claude Code CLI** | Required (powers /ask, /do, /complex) |
 | **Signal account** | Required |
 
 The bot runs natively in a Python venv, managed by systemd (Linux) or launchd (macOS). Docker is only used for the Signal bridge (signal-cli-rest-api).
@@ -302,7 +302,7 @@ The memory system gives Nightwire persistent context across sessions. Conversati
 
 ### Nightwire AI Assistant (Optional)
 
-All code commands (`/ask`, `/do`, `/complex`) are powered by **Claude** via Claude CLI. Separately, you can enable a lightweight quick-response assistant backed by any OpenAI-compatible API for general knowledge questions that don't need project file access. OpenAI and Grok are built-in presets, but you can point it at any provider (Morpheus, Ollama, LM Studio, etc.). This is optional — Claude handles all the real work.
+All code commands (`/ask`, `/do`, `/complex`) are powered by **Claude** via the Claude Code CLI. Separately, you can enable a lightweight quick-response assistant backed by any OpenAI-compatible API for general knowledge questions that don't need project file access. OpenAI and Grok are built-in presets, but you can point it at any provider (Morpheus, Ollama, LM Studio, etc.). This is optional — Claude handles all the real work.
 
 | Command | Description |
 |---------|-------------|
@@ -401,7 +401,8 @@ signal_api_url: "http://127.0.0.1:8080"
 
 # Claude CLI settings
 claude_timeout: 600         # Max seconds per Claude invocation (default: 1800)
-claude_max_turns: 15        # Max conversation turns per invocation
+# claude_max_turns: 15        # Max conversation turns per invocation
+# claude_model: "claude-sonnet-4-5"    # Override model
 # claude_path: "/usr/local/bin/claude"  # Override Claude CLI path
 
 # Project directories
@@ -450,17 +451,25 @@ nightwire_assistant:
   # api_key_env: "MY_PROVIDER_API_KEY"
 ```
 
-### Claude CLI Authentication
+### Claude Code Authentication
 
-Claude CLI handles its own authentication — no API key needed in `.env`.
+Nightwire uses the Claude Code CLI, which supports two auth methods:
 
 ```bash
-claude login
+# Option 1: Pro/Max subscription (recommended — uses your existing plan)
+claude auth login
+
+# Option 2: API key (pay-per-token via console.anthropic.com)
+# Add to config/.env:
+# ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 ### Environment Variables (.env)
 
 ```bash
+# Optional — only needed if NOT using Claude CLI OAuth login
+# ANTHROPIC_API_KEY=sk-ant-...
+
 # Optional (for nightwire AI assistant) — set one or both
 OPENAI_API_KEY=sk-...
 GROK_API_KEY=xai-...
@@ -515,6 +524,10 @@ systemctl --user start nightwire
 
 # View logs
 journalctl --user -u nightwire -f
+# Or view subsystem-specific logs:
+tail -f logs/claude.log        # Claude CLI calls
+tail -f logs/autonomous.log    # Task execution
+tail -f logs/memory.log        # Memory operations
 
 # Stop
 systemctl --user stop nightwire
@@ -526,8 +539,10 @@ systemctl --user stop nightwire
 # Start
 launchctl load ~/Library/LaunchAgents/com.nightwire.bot.plist
 
-# View logs
-tail -f /path/to/nightwire/logs/nightwire.log
+# View logs (combined or subsystem-specific)
+tail -f /path/to/nightwire/logs/nightwire.log    # Combined
+tail -f /path/to/nightwire/logs/claude.log       # Claude CLI
+tail -f /path/to/nightwire/logs/autonomous.log   # Task execution
 
 # Stop
 launchctl unload ~/Library/LaunchAgents/com.nightwire.bot.plist
@@ -852,6 +867,7 @@ The autonomous system is designed for tasks too large for a single Claude invoca
 - **Path validation hardening** - Directory traversal protection with strict prefix matching
 - **Phone number masking in logs** - Sensitive identifiers are redacted in all log output
 - **Independent code verification** - Every autonomous task is reviewed by a separate Claude context with a fail-closed security model
+- **Automatic secret sanitization** - API keys, Bearer tokens, and phone numbers are automatically scrubbed from all log output
 - API keys are stored in `.env` (not committed to git)
 - Signal messages are end-to-end encrypted
 - No message content is logged by default
@@ -875,8 +891,8 @@ The autonomous system is designed for tasks too large for a single Claude invoca
 ### Claude commands failing
 
 1. Verify Claude CLI works: `claude --version`
-2. Check authentication: `claude login`
-3. Test manually: `claude "hello"`
+2. Check authentication: `claude auth status`
+3. Check logs: `tail -f logs/claude.log`
 
 ### Memory not persisting
 

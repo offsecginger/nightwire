@@ -1,42 +1,63 @@
-"""Database operations for the autonomous task system."""
+"""Database operations for the autonomous task system.
+
+Provides SQLite CRUD for PRDs, stories, tasks, and learnings.
+All public methods are async (delegating to ``asyncio.to_thread``
+for the synchronous sqlite3 driver). The connection is shared
+with the memory system and uses WAL mode for concurrent reads.
+
+Classes:
+    AutonomousDatabase: Full CRUD for the PRD/Story/Task/Learning
+        hierarchy, keyword-based learning search, task statistics,
+        and queue management.
+"""
 
 import asyncio
 import json
 import sqlite3
 from datetime import datetime
-from pathlib import Path
-from typing import Optional, List, Any
+from typing import Any, List, Optional
 
 import structlog
 
 from .models import (
     PRD,
+    EffortLevel,
+    Learning,
+    LearningCategory,
     PRDStatus,
+    QualityGateResult,
     Story,
     StoryStatus,
     Task,
     TaskStatus,
-    Learning,
-    LearningCategory,
-    QualityGateResult,
-    VerificationResult,
-    EffortLevel,
     TaskType,
+    VerificationResult,
 )
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.autonomous")
 
 
 class AutonomousDatabase:
     """Database operations for autonomous task management.
 
+    Provides async CRUD for the PRD -> Story -> Task hierarchy
+    and the learnings subsystem. Each public method delegates
+    to a synchronous ``_*_sync`` counterpart via
+    ``asyncio.to_thread``.
+
     Note: Task/PRD/Story access is not scoped by phone number.
-    All authorized users share the same workspace — this is by design.
-    Authorization is enforced at the Signal message entry point (security.py).
+    All authorized users share the same workspace -- this is
+    by design. Authorization is enforced at the Signal message
+    entry point (security.py).
     """
 
     def __init__(self, conn: sqlite3.Connection):
-        """Initialize with existing database connection from memory system."""
+        """Initialize with an existing database connection.
+
+        Args:
+            conn: SQLite connection (shared with memory system).
+                  Row factory is set to ``sqlite3.Row``.
+        """
         self._conn = conn
         self._conn.row_factory = sqlite3.Row
 
@@ -69,7 +90,19 @@ class AutonomousDatabase:
         status: PRDStatus = PRDStatus.DRAFT,
         metadata: Optional[dict[str, Any]] = None,
     ) -> PRD:
-        """Create a new PRD."""
+        """Create a new PRD and persist it to the database.
+
+        Args:
+            phone_number: Owner's phone number (E.164 format).
+            project_name: Associated project name.
+            title: PRD title.
+            description: Full PRD description.
+            status: Initial status (default DRAFT).
+            metadata: Optional JSON-serializable metadata.
+
+        Returns:
+            The created PRD with its assigned database ID.
+        """
         return await asyncio.to_thread(
             self._create_prd_sync,
             phone_number,
@@ -112,7 +145,15 @@ class AutonomousDatabase:
         )
 
     async def get_prd(self, prd_id: int) -> Optional[PRD]:
-        """Get a PRD by ID with story counts."""
+        """Get a PRD by ID with aggregated story counts.
+
+        Args:
+            prd_id: Database ID of the PRD.
+
+        Returns:
+            PRD with total/completed/failed story counts,
+            or None if not found.
+        """
         return await asyncio.to_thread(self._get_prd_sync, prd_id)
 
     def _get_prd_sync(self, prd_id: int) -> Optional[PRD]:
@@ -157,7 +198,16 @@ class AutonomousDatabase:
         project_name: Optional[str] = None,
         status: Optional[PRDStatus] = None,
     ) -> List[PRD]:
-        """List PRDs for a user."""
+        """List PRDs for a user, optionally filtered.
+
+        Args:
+            phone_number: Owner's phone number.
+            project_name: Filter by project (optional).
+            status: Filter by PRD status (optional).
+
+        Returns:
+            List of PRDs ordered by creation date descending.
+        """
         return await asyncio.to_thread(
             self._list_prds_sync, phone_number, project_name, status
         )
@@ -216,7 +266,12 @@ class AutonomousDatabase:
     async def update_prd_status(
         self, prd_id: int, status: PRDStatus
     ) -> None:
-        """Update PRD status."""
+        """Update PRD status and set completed_at if COMPLETED.
+
+        Args:
+            prd_id: Database ID of the PRD.
+            status: New PRD status.
+        """
         await asyncio.to_thread(self._update_prd_status_sync, prd_id, status)
 
     def _update_prd_status_sync(self, prd_id: int, status: PRDStatus) -> None:
@@ -249,7 +304,23 @@ class AutonomousDatabase:
         priority: int = 0,
         metadata: Optional[dict[str, Any]] = None,
     ) -> Story:
-        """Create a new story."""
+        """Create a new story within a PRD.
+
+        Automatically assigns the next ``story_order`` within
+        the parent PRD.
+
+        Args:
+            prd_id: Parent PRD database ID.
+            phone_number: Owner's phone number.
+            title: Story title.
+            description: Story description.
+            acceptance_criteria: Verification checklist.
+            priority: Execution priority (higher = first).
+            metadata: Optional JSON-serializable metadata.
+
+        Returns:
+            The created Story with its assigned database ID.
+        """
         return await asyncio.to_thread(
             self._create_story_sync,
             prd_id,
@@ -286,7 +357,8 @@ class AutonomousDatabase:
         cursor.execute(
             """
             INSERT INTO stories
-            (prd_id, phone_number, title, description, acceptance_criteria, priority, story_order, metadata)
+            (prd_id, phone_number, title, description,
+             acceptance_criteria, priority, story_order, metadata)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
@@ -315,7 +387,15 @@ class AutonomousDatabase:
         )
 
     async def get_story(self, story_id: int) -> Optional[Story]:
-        """Get a story by ID with task counts."""
+        """Get a story by ID with aggregated task counts.
+
+        Args:
+            story_id: Database ID of the story.
+
+        Returns:
+            Story with total/completed/failed task counts,
+            or None if not found.
+        """
         return await asyncio.to_thread(self._get_story_sync, story_id)
 
     def _get_story_sync(self, story_id: int) -> Optional[Story]:
@@ -368,7 +448,16 @@ class AutonomousDatabase:
         phone_number: Optional[str] = None,
         status: Optional[StoryStatus] = None,
     ) -> List[Story]:
-        """List stories with optional filters."""
+        """List stories with optional filters.
+
+        Args:
+            prd_id: Filter by parent PRD (optional).
+            phone_number: Filter by owner (optional).
+            status: Filter by story status (optional).
+
+        Returns:
+            Stories ordered by priority desc, story_order asc.
+        """
         return await asyncio.to_thread(
             self._list_stories_sync, prd_id, phone_number, status
         )
@@ -437,7 +526,12 @@ class AutonomousDatabase:
         ]
 
     async def update_story_status(self, story_id: int, status: StoryStatus) -> None:
-        """Update story status."""
+        """Update story status and set completed_at if COMPLETED.
+
+        Args:
+            story_id: Database ID of the story.
+            status: New story status.
+        """
         await asyncio.to_thread(self._update_story_status_sync, story_id, status)
 
     def _update_story_status_sync(self, story_id: int, status: StoryStatus) -> None:
@@ -474,7 +568,28 @@ class AutonomousDatabase:
         task_type: Optional[str] = None,
         effort_level: Optional[str] = None,
     ) -> Task:
-        """Create a new task."""
+        """Create a new task within a story.
+
+        Automatically assigns the next ``task_order`` within
+        the parent story.
+
+        Args:
+            story_id: Parent story database ID.
+            phone_number: Owner's phone number.
+            project_name: Project to execute in.
+            title: Task title.
+            description: Detailed task description.
+            priority: Execution priority (higher = first).
+            max_retries: Max retry attempts on failure.
+            metadata: Optional JSON-serializable metadata.
+            depends_on: Task IDs this task depends on.
+            task_type: Task type string (auto-detected if None).
+            effort_level: Effort level string (auto-detected
+                if None).
+
+        Returns:
+            The created Task with its assigned database ID.
+        """
         return await asyncio.to_thread(
             self._create_task_sync,
             story_id,
@@ -572,7 +687,14 @@ class AutonomousDatabase:
         )
 
     async def get_task(self, task_id: int) -> Optional[Task]:
-        """Get a task by ID."""
+        """Get a task by ID.
+
+        Args:
+            task_id: Database ID of the task.
+
+        Returns:
+            Task model or None if not found.
+        """
         return await asyncio.to_thread(self._get_task_sync, task_id)
 
     def _get_task_sync(self, task_id: int) -> Optional[Task]:
@@ -653,7 +775,18 @@ class AutonomousDatabase:
         status: Optional[TaskStatus] = None,
         limit: int = 100,
     ) -> List[Task]:
-        """List tasks with optional filters."""
+        """List tasks with optional filters.
+
+        Args:
+            story_id: Filter by parent story (optional).
+            phone_number: Filter by owner (optional).
+            project_name: Filter by project (optional).
+            status: Filter by task status (optional).
+            limit: Maximum results to return.
+
+        Returns:
+            Tasks ordered by priority desc, task_order asc.
+        """
         return await asyncio.to_thread(
             self._list_tasks_sync, story_id, phone_number, project_name, status, limit
         )
@@ -696,7 +829,12 @@ class AutonomousDatabase:
         return [self._row_to_task(row) for row in rows]
 
     async def get_next_queued_task(self) -> Optional[Task]:
-        """Get the next task in queue (highest priority, lowest order)."""
+        """Get the next task in queue.
+
+        Returns:
+            The highest-priority, lowest-order QUEUED task,
+            or None if the queue is empty.
+        """
         return await asyncio.to_thread(self._get_next_queued_task_sync)
 
     def _get_next_queued_task_sync(self) -> Optional[Task]:
@@ -739,7 +877,22 @@ class AutonomousDatabase:
         files_changed: Optional[List[str]] = None,
         quality_gate_results: Optional[QualityGateResult] = None,
     ) -> None:
-        """Update task status and related fields."""
+        """Update task status and related fields.
+
+        When re-queuing (status=QUEUED), execution-specific
+        fields are cleared to prevent stale data from prior
+        attempts persisting via COALESCE.
+
+        Args:
+            task_id: Database ID of the task.
+            status: New task status.
+            started_at: When execution started (optional).
+            completed_at: When execution completed (optional).
+            error_message: Error details if failed (optional).
+            claude_output: Full Claude response (optional).
+            files_changed: Modified file paths (optional).
+            quality_gate_results: QG results (optional).
+        """
         await asyncio.to_thread(
             self._update_task_status_sync,
             task_id,
@@ -818,7 +971,12 @@ class AutonomousDatabase:
     async def store_verification_result(
         self, task_id: int, verification: VerificationResult
     ) -> None:
-        """Store verification result for a task."""
+        """Store verification result for a task.
+
+        Args:
+            task_id: Database ID of the task.
+            verification: Verification result to persist.
+        """
         await asyncio.to_thread(
             self._store_verification_result_sync, task_id, verification
         )
@@ -835,7 +993,11 @@ class AutonomousDatabase:
         self._conn.commit()
 
     async def increment_retry_count(self, task_id: int) -> None:
-        """Increment task retry count."""
+        """Increment task retry count by 1.
+
+        Args:
+            task_id: Database ID of the task.
+        """
         await asyncio.to_thread(self._increment_retry_count_sync, task_id)
 
     def _increment_retry_count_sync(self, task_id: int) -> None:
@@ -846,7 +1008,14 @@ class AutonomousDatabase:
         self._conn.commit()
 
     async def queue_tasks_for_story(self, story_id: int) -> int:
-        """Queue all pending tasks for a story. Returns count queued."""
+        """Queue all pending tasks for a story.
+
+        Args:
+            story_id: Database ID of the story.
+
+        Returns:
+            Number of tasks transitioned from PENDING to QUEUED.
+        """
         return await asyncio.to_thread(self._queue_tasks_for_story_sync, story_id)
 
     def _queue_tasks_for_story_sync(self, story_id: int) -> int:
@@ -863,7 +1032,14 @@ class AutonomousDatabase:
         return cursor.rowcount
 
     async def queue_tasks_for_prd(self, prd_id: int) -> int:
-        """Queue all pending tasks for all stories in a PRD. Returns count queued."""
+        """Queue all pending tasks across all stories in a PRD.
+
+        Args:
+            prd_id: Database ID of the PRD.
+
+        Returns:
+            Number of tasks transitioned from PENDING to QUEUED.
+        """
         return await asyncio.to_thread(self._queue_tasks_for_prd_sync, prd_id)
 
     def _queue_tasks_for_prd_sync(self, prd_id: int) -> int:
@@ -883,7 +1059,14 @@ class AutonomousDatabase:
     # ========== Learning Operations ==========
 
     async def store_learning(self, learning: Learning) -> int:
-        """Store a learning. Returns learning ID."""
+        """Persist a learning to the database.
+
+        Args:
+            learning: Learning model to store.
+
+        Returns:
+            The assigned database ID of the new learning.
+        """
         return await asyncio.to_thread(self._store_learning_sync, learning)
 
     def _store_learning_sync(self, learning: Learning) -> int:
@@ -924,7 +1107,18 @@ class AutonomousDatabase:
         category: Optional[LearningCategory] = None,
         limit: int = 50,
     ) -> List[Learning]:
-        """Get learnings with optional filters."""
+        """Get active learnings with optional filters.
+
+        Args:
+            phone_number: Owner's phone number.
+            project_name: Filter by project (optional).
+                Also includes project-agnostic learnings.
+            category: Filter by category (optional).
+            limit: Maximum results to return.
+
+        Returns:
+            Learnings ordered by confidence desc, usage desc.
+        """
         return await asyncio.to_thread(
             self._get_learnings_sync, phone_number, project_name, category, limit
         )
@@ -988,7 +1182,21 @@ class AutonomousDatabase:
         query: str,
         limit: int = 10,
     ) -> List[Learning]:
-        """Get learnings relevant to a query using keyword matching."""
+        """Get learnings relevant to a query using keyword matching.
+
+        Scores each learning by word overlap in title (0.5x),
+        content (0.3x), and keywords (0.2x), boosted by
+        confidence and usage count. Threshold: score > 0.1.
+
+        Args:
+            phone_number: Owner's phone number.
+            project_name: Filter by project (optional).
+            query: Free-text search query.
+            limit: Maximum results to return.
+
+        Returns:
+            Learnings sorted by relevance score descending.
+        """
         return await asyncio.to_thread(
             self._get_relevant_learnings_sync, phone_number, project_name, query, limit
         )
@@ -1059,7 +1267,11 @@ class AutonomousDatabase:
         return [learning for score, learning in scored_learnings[:limit]]
 
     async def increment_learning_usage(self, learning_id: int) -> None:
-        """Increment learning usage count and update last_used."""
+        """Increment learning usage count and update last_used.
+
+        Args:
+            learning_id: Database ID of the learning.
+        """
         await asyncio.to_thread(self._increment_learning_usage_sync, learning_id)
 
     def _increment_learning_usage_sync(self, learning_id: int) -> None:
@@ -1075,7 +1287,17 @@ class AutonomousDatabase:
         self._conn.commit()
 
     async def decay_unused_learnings(self, days_threshold: int = 30) -> int:
-        """Decay confidence of unused learnings. Returns count affected."""
+        """Decay confidence of unused learnings by 10%.
+
+        Targets active learnings not used within the threshold
+        period and with confidence > 0.1.
+
+        Args:
+            days_threshold: Days of inactivity before decay.
+
+        Returns:
+            Number of learnings whose confidence was reduced.
+        """
         return await asyncio.to_thread(
             self._decay_unused_learnings_sync, days_threshold
         )
@@ -1100,7 +1322,16 @@ class AutonomousDatabase:
     async def get_task_stats(
         self, phone_number: str, project_name: Optional[str] = None
     ) -> dict:
-        """Get task statistics."""
+        """Get task statistics grouped by status.
+
+        Args:
+            phone_number: Owner's phone number.
+            project_name: Filter by project (optional).
+
+        Returns:
+            Dict with per-status counts, total, and today's
+            completed/failed counts.
+        """
         return await asyncio.to_thread(
             self._get_task_stats_sync, phone_number, project_name
         )

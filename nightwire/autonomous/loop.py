@@ -1,36 +1,56 @@
-"""Autonomous task execution loop with parallel task support."""
+"""Autonomous task execution loop with parallel task support.
+
+Runs as a background asyncio task, polling the task queue and
+dispatching parallel workers up to a configurable concurrency
+limit. Handles dependency resolution, circular dependency
+detection, stale task recovery, story/PRD completion tracking,
+retry logic, and user notifications via Signal.
+
+Classes:
+    AutonomousLoop: Background loop that polls the task queue,
+        dispatches workers, and manages task lifecycle.
+"""
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import Optional, List, Callable, Awaitable, Set
+from typing import Awaitable, Callable, List, Optional, Set
 
 import structlog
 
+from .database import AutonomousDatabase
 from .exceptions import (
     AutonomousError,
-    LoopError,
-    NotificationError,
-    StaleTaskRecoveryError,
-    WorkerError,
 )
+from .executor import TaskExecutor
 from .models import (
+    LoopStatus,
+    PRDStatus,
+    StoryStatus,
     Task,
     TaskStatus,
-    StoryStatus,
-    PRDStatus,
-    LoopStatus,
 )
-from .database import AutonomousDatabase
-from .executor import TaskExecutor
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.autonomous")
 
 # Tasks stuck IN_PROGRESS longer than this are considered stale (crash recovery)
 STALE_TASK_TIMEOUT_MINUTES = 60
 
 
 class AutonomousLoop:
-    """Background loop for autonomous task execution with parallel workers."""
+    """Background loop for autonomous task execution.
+
+    Polls the task queue at a configurable interval and dispatches
+    up to ``max_parallel`` concurrent workers. Workers are bounded
+    by an ``asyncio.Semaphore`` and resource checks (CPU/memory).
+
+    Features:
+        - Dependency-aware parallel batching
+        - Circular dependency detection (DFS cycle detection)
+        - Stale task recovery on startup (crash recovery)
+        - Automatic story/PRD completion tracking
+        - Retry logic with configurable max retries
+        - Daily task counter reset at midnight
+    """
 
     def __init__(
         self,
@@ -91,7 +111,12 @@ class AutonomousLoop:
             self._counter_date = today
 
     async def get_status(self) -> LoopStatus:
-        """Get current loop status."""
+        """Get current loop status snapshot.
+
+        Returns:
+            LoopStatus with running/paused state, active
+            workers, queue depth, daily counters, and uptime.
+        """
         self._reset_daily_counters_if_needed()
         queued_count = await self.db.get_queued_task_count()
         uptime = 0.0
@@ -112,7 +137,12 @@ class AutonomousLoop:
         )
 
     async def start(self) -> None:
-        """Start the autonomous loop."""
+        """Start the autonomous loop.
+
+        Recovers any stale tasks from a previous crash, then
+        spawns the background polling task. No-op if already
+        running.
+        """
         if self._running:
             logger.warning("autonomous_loop_already_running")
             return
@@ -130,7 +160,7 @@ class AutonomousLoop:
         logger.info("autonomous_loop_started", max_parallel=self.max_parallel)
 
     async def stop(self) -> None:
-        """Stop the autonomous loop."""
+        """Stop the autonomous loop and cancel all workers."""
         self._running = False
 
         # Cancel all active workers
@@ -154,7 +184,7 @@ class AutonomousLoop:
         logger.info("autonomous_loop_stopped")
 
     async def pause(self) -> None:
-        """Pause processing (finishes current tasks first)."""
+        """Pause processing (active tasks finish, no new dispatches)."""
         self._paused = True
         logger.info("autonomous_loop_paused")
 
@@ -281,6 +311,12 @@ class AutonomousLoop:
             # Check dependencies
             if task.depends_on:
                 deps_met = await self._check_dependencies(task.depends_on)
+                logger.debug(
+                    "dependency_check",
+                    task_id=task.id,
+                    dependencies=task.depends_on,
+                    all_satisfied=deps_met,
+                )
                 if not deps_met:
                     continue
 
@@ -349,6 +385,8 @@ class AutonomousLoop:
         """Wrapper for worker that handles semaphore and error recovery."""
         from ..resource_guard import check_resources
 
+        logger.debug("worker_dispatch", task_id=task.id, active_workers=len(self._active_task_ids))
+
         # Check resources before acquiring semaphore slot
         status = check_resources()
         if not status.ok:
@@ -381,6 +419,12 @@ class AutonomousLoop:
 
         try:
             # Update status to in_progress
+            logger.debug(
+                "task_state_transition",
+                task_id=task.id,
+                from_status="queued",
+                to_status="in_progress",
+            )
             await self.db.update_task_status(
                 task.id, TaskStatus.IN_PROGRESS, started_at=datetime.now()
             )
@@ -419,12 +463,29 @@ class AutonomousLoop:
 
             # Handle result
             if result.success:
+                logger.debug(
+                    "task_state_transition",
+                    task_id=task.id,
+                    from_status="in_progress",
+                    to_status="completed",
+                )
                 await self._handle_success(task, result)
             else:
+                logger.debug(
+                    "task_state_transition",
+                    task_id=task.id,
+                    from_status="in_progress",
+                    to_status="failed",
+                )
                 await self._handle_failure(task, result)
 
         except AutonomousError as e:
-            logger.error("task_processing_error", task_id=task.id, error=str(e), exc_type=type(e).__name__)
+            logger.error(
+                "task_processing_error",
+                task_id=task.id,
+                error=str(e),
+                exc_type=type(e).__name__,
+            )
             await self.db.update_task_status(
                 task.id, TaskStatus.FAILED, error_message=f"[{type(e).__name__}] {e}"
             )
@@ -434,7 +495,12 @@ class AutonomousLoop:
                 f"Task FAILED: {task.title}\nCheck logs for details."
             )
         except (OSError, asyncio.TimeoutError, RuntimeError, ValueError) as e:
-            logger.error("task_processing_error", task_id=task.id, error=str(e), exc_type=type(e).__name__)
+            logger.error(
+                "task_processing_error",
+                task_id=task.id,
+                error=str(e),
+                exc_type=type(e).__name__,
+            )
             await self.db.update_task_status(
                 task.id, TaskStatus.FAILED, error_message=f"[{type(e).__name__}] {e}"
             )
@@ -481,8 +547,14 @@ class AutonomousLoop:
         await self._check_story_completion(task.story_id)
 
         # Notify user
-        files_info = f"\nFiles changed: {len(result.files_changed)}" if result.files_changed else ""
-        learnings_info = f"\nLearnings captured: {len(result.learnings_extracted)}" if result.learnings_extracted else ""
+        files_info = (
+            f"\nFiles changed: {len(result.files_changed)}"
+            if result.files_changed else ""
+        )
+        learnings_info = (
+            f"\nLearnings captured: {len(result.learnings_extracted)}"
+            if result.learnings_extracted else ""
+        )
         verification_info = ""
         if result.verification:
             if result.verification.passed:
@@ -510,7 +582,8 @@ class AutonomousLoop:
             await self._notify(
                 task.phone_number,
                 f"Task failed, retrying ({task.retry_count + 1}/{task.max_retries}): "
-                f"{task.title}\nError: {result.error_message[:200] if result.error_message else 'Unknown'}"
+                f"{task.title}\nError: "
+                f"{result.error_message[:200] if result.error_message else 'Unknown'}"
             )
         else:
             # Max retries reached
@@ -635,7 +708,7 @@ class AutonomousLoop:
                     summary += f"  ... and {len(sorted_files) - 15} more files\n"
 
             # Add stats
-            summary += f"\nStats:\n"
+            summary += "\nStats:\n"
             summary += f"  Tasks: {total_tasks - failed_tasks} completed"
             if failed_tasks > 0:
                 summary += f", {failed_tasks} failed"
@@ -670,7 +743,10 @@ class AutonomousLoop:
                         await self.db.update_task_status(
                             task.id,
                             TaskStatus.QUEUED,
-                            error_message=f"Recovered from stale state (was IN_PROGRESS for >{STALE_TASK_TIMEOUT_MINUTES}min)",
+                            error_message=(
+                                f"Recovered from stale state (was IN_PROGRESS"
+                                f" for >{STALE_TASK_TIMEOUT_MINUTES}min)"
+                            ),
                         )
                         logger.info(
                             "stale_task_requeued",
@@ -686,7 +762,10 @@ class AutonomousLoop:
                         await self.db.update_task_status(
                             task.id,
                             TaskStatus.FAILED,
-                            error_message=f"Failed: task was stuck IN_PROGRESS and has no retries left",
+                            error_message=(
+                                "Failed: task was stuck IN_PROGRESS"
+                                " and has no retries left"
+                            ),
                         )
                         logger.warning(
                             "stale_task_failed",

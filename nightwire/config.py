@@ -1,4 +1,17 @@
-"""Configuration management for nightwire."""
+"""Configuration management for nightwire.
+
+Loads YAML settings (settings.yaml, projects.yaml) and environment
+variables (.env) into a typed Config object. Property getters provide
+safe access with sensible defaults for every subsystem: Claude SDK,
+Nightwire assistant, memory, autonomous, logging, plugins, sandbox,
+and auto-update.
+
+Key classes:
+    Config: Central configuration manager.
+
+Key functions:
+    get_config: Singleton accessor for the global Config instance.
+"""
 
 import os
 import shutil
@@ -9,11 +22,21 @@ import structlog
 import yaml
 from dotenv import load_dotenv
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.bot")
 
 
 class Config:
-    """Configuration manager for the bot."""
+    """Central configuration manager for nightwire.
+
+    Loads settings.yaml, projects.yaml, and .env from the config
+    directory. Provides typed property accessors for every
+    configurable subsystem. Thread-safe for reads (no mutation
+    after __init__ except save_projects/add_project/remove_project).
+
+    Args:
+        config_dir: Path to the config directory. Defaults to
+            ``<repo_root>/config/``.
+    """
 
     def __init__(self, config_dir: Optional[Path] = None):
         if config_dir is None:
@@ -53,7 +76,12 @@ class Config:
         return numbers
 
     def validate(self):
-        """Validate critical settings at startup. Call from main.py."""
+        """Validate critical settings at startup.
+
+        Checks allowed_numbers format (E.164 or UUID) and
+        autonomous config constraints. Logs warnings/errors
+        but does not raise -- the bot starts in degraded mode.
+        """
         import re
         uuid_pattern = re.compile(
             r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
@@ -75,7 +103,12 @@ class Config:
         if isinstance(auto_config, dict):
             mp = auto_config.get("max_parallel")
             if mp is not None and (not isinstance(mp, int) or mp < 1 or mp > 10):
-                logger.error("config_invalid_value", key="autonomous.max_parallel", value=mp, valid="1-10")
+                logger.error(
+                    "config_invalid_value",
+                    key="autonomous.max_parallel",
+                    value=mp,
+                    valid="1-10",
+                )
 
     @property
     def signal_api_url(self) -> str:
@@ -99,6 +132,30 @@ class Config:
         return Path(__file__).parent.parent / "logs"
 
     @property
+    def logging_level(self) -> str:
+        """Global log level (default INFO). Controls console and combined file."""
+        log_config = self.settings.get("logging", {})
+        return log_config.get("level", "INFO")
+
+    @property
+    def logging_subsystem_levels(self) -> dict:
+        """Per-subsystem log level overrides. E.g. {"autonomous": "DEBUG"}."""
+        log_config = self.settings.get("logging", {})
+        return log_config.get("subsystem_levels", {})
+
+    @property
+    def logging_max_file_size_mb(self) -> int:
+        """Max size per log file in MB before rotation (default 10)."""
+        log_config = self.settings.get("logging", {})
+        return log_config.get("max_file_size_mb", 10)
+
+    @property
+    def logging_backup_count(self) -> int:
+        """Number of rotated log files to keep (default 5)."""
+        log_config = self.settings.get("logging", {})
+        return log_config.get("backup_count", 5)
+
+    @property
     def claude_timeout(self) -> int:
         """Get Claude command timeout in seconds (default 30 minutes)."""
         return self.settings.get("claude_timeout", 1800)
@@ -110,25 +167,77 @@ class Config:
 
     @property
     def claude_path(self) -> str:
-        """Get absolute path to Claude CLI binary."""
+        """Get absolute path to Claude CLI binary.
+
+        Resolution order: settings.yaml ``claude_path`` → ``which claude``
+        → ``~/.local/bin/claude`` → bare ``claude`` (relies on PATH).
+        """
         configured = self.settings.get("claude_path")
         if configured:
             return configured
-        # Try to find claude in PATH
         found = shutil.which("claude")
         if found:
             return found
-        # Fallback to common locations
         home_local = Path.home() / ".local" / "bin" / "claude"
         if home_local.exists():
             return str(home_local)
-        return "claude"  # Hope it's in PATH
+        return "claude"
+
+    @property
+    def claude_api_key(self) -> str:
+        """Get Anthropic API key (optional).
+
+        Only needed if not using Claude CLI OAuth login. The CLI
+        also reads this env var directly, so setting it provides
+        API key auth to both the CLI and any direct SDK callers.
+        """
+        return os.environ.get("ANTHROPIC_API_KEY", "")
+
+    @property
+    def claude_model(self) -> str:
+        """Get Claude model for CLI calls (default claude-sonnet-4-5).
+
+        Passed as ``--model`` flag to the CLI. Supports model aliases
+        like ``sonnet``, ``opus``, ``haiku`` or full model IDs.
+        Override via ``claude_model`` in settings.yaml.
+        """
+        return self.settings.get("claude_model", "claude-sonnet-4-5")
+
+    @property
+    def claude_system_prompt(self) -> str:
+        """Load CLAUDE.md guidelines as system prompt text.
+
+        The CLI runner uses ``--append-system-prompt-file`` instead of
+        this property. Retained for any callers that need the raw text.
+        """
+        guidelines_path = self.config_dir / "CLAUDE.md"
+        if guidelines_path.exists():
+            try:
+                return guidelines_path.read_text(encoding="utf-8")
+            except Exception as e:
+                logger.error("guidelines_load_error", error=str(e))
+        return ""
+
+    @property
+    def anthropic_client_config(self) -> dict:
+        """Get Anthropic SDK client config (timeout, max_retries).
+
+        Reads from settings.yaml 'anthropic' section with sensible defaults.
+        """
+        anthropic_config = self.settings.get("anthropic", {})
+        return {
+            "timeout": anthropic_config.get("timeout", 600.0),
+            "max_retries": anthropic_config.get("max_retries", 2),
+        }
 
     # nightwire AI assistant configuration (any OpenAI-compatible provider)
     @property
     def nightwire_assistant_enabled(self) -> bool:
         """Whether nightwire AI assistant is enabled."""
-        sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
+        sc_config = (
+            self.settings.get("nightwire_assistant")
+            or self.settings.get("sidechannel_assistant", {})
+        )
         if sc_config.get("enabled") is not None:
             return sc_config.get("enabled", False)
         # Fallback to legacy nova / grok config
@@ -155,7 +264,10 @@ class Config:
         4. Both keys present -> 'grok' (backward compat)
         5. Neither key -> 'grok' (will fail gracefully at call time)
         """
-        sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
+        sc_config = (
+            self.settings.get("nightwire_assistant")
+            or self.settings.get("sidechannel_assistant", {})
+        )
         explicit = sc_config.get("provider")
         if explicit:
             return explicit
@@ -183,7 +295,10 @@ class Config:
         3. provider == 'grok' -> GROK_API_KEY
         4. Fallback: NIGHTWIRE_API_KEY env var
         """
-        sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
+        sc_config = (
+            self.settings.get("nightwire_assistant")
+            or self.settings.get("sidechannel_assistant", {})
+        )
         api_key_env = sc_config.get("api_key_env")
         if api_key_env:
             key = os.environ.get(api_key_env, "")
@@ -206,7 +321,10 @@ class Config:
         2. Provider presets: openai/grok
         3. No default for unknown providers (log warning)
         """
-        sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
+        sc_config = (
+            self.settings.get("nightwire_assistant")
+            or self.settings.get("sidechannel_assistant", {})
+        )
         custom_url = sc_config.get("api_url")
         if custom_url:
             return custom_url
@@ -233,7 +351,10 @@ class Config:
         2. Provider presets: openai -> gpt-4o, grok -> grok-3-latest
         3. No default for unknown providers (log warning)
         """
-        sc_config = self.settings.get("nightwire_assistant") or self.settings.get("sidechannel_assistant", {})
+        sc_config = (
+            self.settings.get("nightwire_assistant")
+            or self.settings.get("sidechannel_assistant", {})
+        )
         model = sc_config.get("model")
         if model:
             return model
@@ -396,7 +517,16 @@ class Config:
         return self.projects.get("projects", [])
 
     def add_project(self, name: str, path: str, description: str = "") -> bool:
-        """Add a new project to the registry."""
+        """Add a new project to the registry.
+
+        Args:
+            name: Unique project name.
+            path: Absolute filesystem path to the project.
+            description: Optional one-line description.
+
+        Returns:
+            True if added, False if a project with that name exists.
+        """
         # Check if project already exists
         for p in self.projects.get("projects", []):
             if p["name"] == name:
@@ -414,7 +544,14 @@ class Config:
         return True
 
     def remove_project(self, name: str) -> bool:
-        """Remove a project from the registry by name (case-insensitive)."""
+        """Remove a project from the registry by name.
+
+        Args:
+            name: Project name (case-insensitive match).
+
+        Returns:
+            True if removed, False if not found.
+        """
         projects = self.projects.get("projects", [])
         for i, p in enumerate(projects):
             if p["name"].lower() == name.lower():

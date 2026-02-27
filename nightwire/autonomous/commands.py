@@ -1,13 +1,16 @@
-"""Command handlers for autonomous system."""
+"""Command handlers for the autonomous task system.
 
-from typing import Optional
+Provides Signal slash-command handlers for managing PRDs, stories, tasks,
+the autonomous execution loop, task queue, and learnings. Each ``handle_*``
+method is registered via ``register_external()`` in bot.py.
+"""
 
 import structlog
 
-from .models import LearningCategory, TaskStatus
 from .manager import AutonomousManager
+from .models import LearningCategory, TaskStatus
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.autonomous")
 
 
 class AutonomousCommands:
@@ -27,7 +30,23 @@ class AutonomousCommands:
     # ========== /prd Command ==========
 
     async def handle_prd(self, phone: str, args: str) -> str:
-        """/prd command handler."""
+        """Create, list, view, activate, or archive Product Requirements Documents.
+
+        Signal usage::
+
+            /prd Build a REST API           — Create a new PRD
+            /prd list                       — List all PRDs
+            /prd 3                          — Show PRD #3 details
+            /prd activate 3                 — Activate PRD #3
+            /prd archive 3                  — Archive PRD #3
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Subcommand or PRD title for creation.
+
+        Returns:
+            PRD details, list, or confirmation message.
+        """
         if not args.strip():
             return self._prd_help()
 
@@ -167,7 +186,22 @@ Example:
     # ========== /story Command ==========
 
     async def handle_story(self, phone: str, args: str) -> str:
-        """/story command handler."""
+        """Create, list, or view user stories within a PRD.
+
+        Signal usage::
+
+            /story 1 User login | Users can log in with email
+            /story list                     — List all stories
+            /story list 1                   — List stories for PRD #1
+            /story 5                        — Show story #5 details
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Subcommand, story ID, or ``<prd_id> <title> | <desc>``.
+
+        Returns:
+            Story details, list, or confirmation message.
+        """
         if not args.strip():
             return self._story_help()
 
@@ -296,7 +330,20 @@ Example:
     # ========== /task Command ==========
 
     async def handle_task(self, phone: str, args: str) -> str:
-        """/task command handler."""
+        """Create or view tasks within a story.
+
+        Signal usage::
+
+            /task 1 Create login form | Build HTML form with validation
+            /task 7                         — Show task #7 details
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Task ID to view, or ``<story_id> <title> | <desc>`` to create.
+
+        Returns:
+            Task details or confirmation message.
+        """
         if not args.strip():
             return self._task_help()
 
@@ -387,7 +434,21 @@ Example:
     # ========== /tasks Command ==========
 
     async def handle_tasks(self, phone: str, args: str) -> str:
-        """/tasks command handler - list tasks."""
+        """List tasks grouped by status, with optional status filter.
+
+        Signal usage::
+
+            /tasks                          — List all tasks
+            /tasks queued                   — Show only queued tasks
+            /tasks completed                — Show only completed tasks
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Optional status filter (pending, queued, in_progress, etc.).
+
+        Returns:
+            Formatted task list grouped by status with summary stats.
+        """
         project_name, _ = self.get_current_project(phone)
 
         status_filter = None
@@ -424,14 +485,35 @@ Example:
                     lines.append(f"  ... and {len(by_status[status]) - 10} more")
 
         stats = await self.manager.get_task_stats(phone, project_name)
-        lines.append(f"\nTotal: {stats['total']} | Today: {stats['completed_today']} done, {stats['failed_today']} failed")
+        lines.append(
+            f"\nTotal: {stats['total']} | "
+            f"Today: {stats['completed_today']} done, "
+            f"{stats['failed_today']} failed"
+        )
 
         return "\n".join(lines)
 
     # ========== /autonomous Command ==========
 
     async def handle_autonomous(self, phone: str, args: str) -> str:
-        """/autonomous command handler."""
+        """Control the autonomous task execution loop.
+
+        Signal usage::
+
+            /autonomous                     — Show loop status (default)
+            /autonomous status              — Same as above
+            /autonomous start               — Start processing queued tasks
+            /autonomous pause               — Pause (finishes current task)
+            /autonomous resume              — Resume from paused state
+            /autonomous stop                — Stop the loop entirely
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Subcommand — start, stop, pause, resume, or status.
+
+        Returns:
+            Loop status or confirmation of the action taken.
+        """
         if not args.strip():
             return await self._autonomous_status(phone)
 
@@ -485,7 +567,20 @@ Example:
     # ========== /queue Command ==========
 
     async def handle_queue(self, phone: str, args: str) -> str:
-        """/queue command handler."""
+        """Queue tasks for autonomous execution by story or PRD.
+
+        Signal usage::
+
+            /queue story 1                  — Queue all tasks in story #1
+            /queue prd 2                    — Queue all tasks in PRD #2
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: ``story <id>`` or ``prd <id>``.
+
+        Returns:
+            Count of tasks queued, or usage help.
+        """
         if not args.strip():
             return """Queue Commands:
 /queue story <id> - Queue all tasks for a story
@@ -515,7 +610,22 @@ Example:
     # ========== /learnings Command ==========
 
     async def handle_learnings(self, phone: str, args: str) -> str:
-        """/learnings command handler."""
+        """View, search, or manually add learnings extracted from task execution.
+
+        Signal usage::
+
+            /learnings                      — List recent learnings
+            /learnings search auth          — Search learnings
+            /learnings auth patterns        — Also searches (implicit)
+            /learnings add pattern | Title | Content details here
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Empty for list, ``search <query>``, or ``add <cat> | <title> | <content>``.
+
+        Returns:
+            Formatted learnings list, search results, or confirmation.
+        """
         if not args.strip():
             return await self._list_learnings(phone)
 
@@ -544,8 +654,8 @@ Example:
             return "No learnings yet. They'll be extracted as tasks complete."
 
         lines = ["Recent Learnings:"]
-        for l in learnings[:15]:
-            lines.append(f"  [{l.category.value}] {l.title[:50]}")
+        for learning in learnings[:15]:
+            lines.append(f"  [{learning.category.value}] {learning.title[:50]}")
 
         return "\n".join(lines)
 
@@ -565,16 +675,20 @@ Example:
             return f"No learnings found for: {query}"
 
         lines = [f"Learnings for '{query}':"]
-        for l in learnings[:10]:
-            lines.append(f"\n[{l.category.value}] {l.title}")
-            lines.append(f"  {l.content[:150]}...")
+        for learning in learnings[:10]:
+            lines.append(f"\n[{learning.category.value}] {learning.title}")
+            lines.append(f"  {learning.content[:150]}...")
 
         return "\n".join(lines)
 
     async def _add_learning(self, phone: str, args: str) -> str:
         """Manually add a learning."""
         if "|" not in args:
-            return "Usage: /learnings add <category> | <title> | <content>\n\nCategories: pattern, pitfall, best_practice, debugging, testing"
+            return (
+                "Usage: /learnings add <category> | <title> | "
+                "<content>\n\nCategories: pattern, pitfall, "
+                "best_practice, debugging, testing"
+            )
 
         parts = args.split("|")
         if len(parts) < 3:

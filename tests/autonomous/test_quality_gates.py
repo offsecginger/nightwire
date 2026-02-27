@@ -1,7 +1,7 @@
 """Tests for quality gates security scan."""
 
+
 import pytest
-from pathlib import Path
 
 from nightwire.autonomous.quality_gates import QualityGateRunner
 

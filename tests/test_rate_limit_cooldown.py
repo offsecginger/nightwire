@@ -3,7 +3,7 @@
 import asyncio
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -227,48 +227,48 @@ class TestClassifyErrorRateLimited:
     """Test that classify_error returns RATE_LIMITED for subscription patterns."""
 
     def test_usage_limit(self):
-        from nightwire.claude_runner import classify_error, ErrorCategory
+        from nightwire.claude_runner import ErrorCategory, classify_error
         result = classify_error(1, "", "429 rate limit: usage limit exceeded")
         assert result == ErrorCategory.RATE_LIMITED
 
     def test_daily_limit(self):
-        from nightwire.claude_runner import classify_error, ErrorCategory
+        from nightwire.claude_runner import ErrorCategory, classify_error
         result = classify_error(1, "429 rate limit: daily limit reached", "")
         assert result == ErrorCategory.RATE_LIMITED
 
     def test_quota_exceeded(self):
-        from nightwire.claude_runner import classify_error, ErrorCategory
+        from nightwire.claude_runner import ErrorCategory, classify_error
         result = classify_error(1, "", "429: quota exceeded for this account")
         assert result == ErrorCategory.RATE_LIMITED
 
     def test_too_many_requests(self):
-        from nightwire.claude_runner import classify_error, ErrorCategory
+        from nightwire.claude_runner import ErrorCategory, classify_error
         result = classify_error(1, "429 too many requests", "")
         assert result == ErrorCategory.RATE_LIMITED
 
     def test_try_again_later(self):
-        from nightwire.claude_runner import classify_error, ErrorCategory
+        from nightwire.claude_runner import ErrorCategory, classify_error
         result = classify_error(1, "", "rate limit hit, try again later")
         assert result == ErrorCategory.RATE_LIMITED
 
     def test_capacity(self):
-        from nightwire.claude_runner import classify_error, ErrorCategory
+        from nightwire.claude_runner import ErrorCategory, classify_error
         result = classify_error(1, "429 rate limit: at capacity", "")
         assert result == ErrorCategory.RATE_LIMITED
 
     def test_overloaded(self):
-        from nightwire.claude_runner import classify_error, ErrorCategory
+        from nightwire.claude_runner import ErrorCategory, classify_error
         result = classify_error(1, "", "rate limit: overloaded")
         assert result == ErrorCategory.RATE_LIMITED
 
     def test_plain_rate_limit_stays_transient(self):
         """A plain rate limit without subscription patterns stays TRANSIENT."""
-        from nightwire.claude_runner import classify_error, ErrorCategory
+        from nightwire.claude_runner import ErrorCategory, classify_error
         result = classify_error(1, "", "rate limit exceeded")
         assert result == ErrorCategory.TRANSIENT
 
     def test_plain_429_stays_transient(self):
-        from nightwire.claude_runner import classify_error, ErrorCategory
+        from nightwire.claude_runner import ErrorCategory, classify_error
         result = classify_error(1, "HTTP 429", "")
         assert result == ErrorCategory.TRANSIENT
 

@@ -1,7 +1,6 @@
 """Tests for resource guard module."""
 
-import pytest
-from nightwire.resource_guard import check_resources, ResourceStatus
+from nightwire.resource_guard import ResourceStatus, check_resources
 
 
 def test_check_resources_returns_status():

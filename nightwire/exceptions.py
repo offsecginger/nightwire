@@ -13,9 +13,11 @@ from typing import Any, Optional
 
 class ErrorCategory(str, Enum):
     """Classification of errors for retry decisions."""
-    TRANSIENT = "transient"          # Worth retrying (timeout, rate limit, process crash)
+
+    TRANSIENT = "transient"          # Worth retrying (timeout, process crash)
     PERMANENT = "permanent"          # Not worth retrying (bad input, token limit)
     INFRASTRUCTURE = "infrastructure"  # CLI not found, env issues
+    RATE_LIMITED = "rate_limited"     # API rate limit hit (activates cooldown)
 
 
 class SignalBotError(Exception):
@@ -67,9 +69,8 @@ class SignalBotError(Exception):
         )
 
 
-# Backward-compatible aliases
+# Backward-compatible alias
 NightwireError = SignalBotError
-SidechannelError = SignalBotError
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +201,7 @@ class ClaudeRunnerError(SignalBotError):
 
 
 class NightwireRunnerError(SignalBotError):
-    """Error from the Nightwire runner."""
+    """Error from the Nightwire AI assistant runner."""
 
     def __init__(
         self,
@@ -214,9 +215,6 @@ class NightwireRunnerError(SignalBotError):
             message, category=category, module=module or "nightwire_runner", **context
         )
 
-
-# Backward-compatible alias
-SidechannelRunnerError = NightwireRunnerError
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +320,7 @@ class SecurityError(SignalBotError):
 # ---------------------------------------------------------------------------
 
 class GrokRunnerError(SignalBotError):
-    """Error from the Grok/nightwire AI assistant runner."""
+    """Legacy error from Grok runner (kept for backward compat)."""
 
     def __init__(
         self,
@@ -338,7 +336,7 @@ class GrokRunnerError(SignalBotError):
 
 
 class MusicControlError(SignalBotError):
-    """Error from a music control plugin."""
+    """Error from a music control plugin (transient by default)."""
 
     def __init__(
         self,

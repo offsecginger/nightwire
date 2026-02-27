@@ -1,4 +1,22 @@
-"""SQLite database for memory storage with vector search support."""
+"""SQLite database layer for the memory subsystem.
+
+Manages all persistent storage for users, sessions, conversations,
+preferences, explicit memories, and the autonomous system (PRDs,
+stories, tasks, learnings). Optionally loads the sqlite-vec
+extension for vector-based embedding search.
+
+Key class:
+    DatabaseConnection -- wraps a SQLite connection with async
+        CRUD methods for every table. Uses threading.Lock for
+        write safety and asyncio.to_thread for non-blocking I/O.
+
+Module-level functions:
+    get_database() -- returns the global singleton connection.
+    initialize_database() -- creates, initializes, and returns
+        the global singleton.
+
+Schema version: 4 (auto-migrated on startup).
+"""
 
 import asyncio
 import json
@@ -7,27 +25,36 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, List, Any
+from typing import Any, List, Optional
 
 import structlog
 
 from .models import (
-    User,
-    Session,
     Conversation,
-    Preference,
     ExplicitMemory,
+    Preference,
     SearchResult,
+    Session,
+    User,
 )
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.memory")
 
 # Schema version for migrations
 SCHEMA_VERSION = 4
 
 
 class DatabaseConnection:
-    """Manages SQLite database connection and operations."""
+    """Manages a SQLite database connection and all CRUD operations.
+
+    All public methods are async and delegate to synchronous helpers
+    via ``asyncio.to_thread``. A ``threading.Lock`` guards write
+    operations that require atomicity.
+
+    Args:
+        db_path: Filesystem path to the SQLite database file.
+            Parent directories are created automatically.
+    """
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -36,7 +63,7 @@ class DatabaseConnection:
         self._lock = threading.Lock()
 
     async def initialize(self) -> None:
-        """Initialize the database with schema."""
+        """Initialize the database connection and create/migrate schema."""
         await asyncio.to_thread(self._initialize_sync)
 
     def _initialize_sync(self) -> None:
@@ -399,7 +426,14 @@ class DatabaseConnection:
 
     # User operations
     async def ensure_user(self, phone_number: str) -> User:
-        """Get or create a user record."""
+        """Get an existing user or create a new one.
+
+        Args:
+            phone_number: E.164 phone number (primary key).
+
+        Returns:
+            The existing or newly created User record.
+        """
         return await asyncio.to_thread(self._ensure_user_sync, phone_number)
 
     def _ensure_user_sync(self, phone_number: str) -> User:
@@ -447,7 +481,19 @@ class DatabaseConnection:
         project_name: Optional[str] = None,
         timeout_minutes: int = 30
     ) -> Session:
-        """Get current session or create a new one if expired."""
+        """Get the active session or create a new one if expired.
+
+        A session expires after ``timeout_minutes`` of inactivity.
+
+        Args:
+            phone_number: User's phone number.
+            project_name: Current project context.
+            timeout_minutes: Inactivity threshold for session
+                expiration.
+
+        Returns:
+            The active or newly created Session.
+        """
         return await asyncio.to_thread(
             self._get_or_create_session_sync,
             phone_number,
@@ -518,7 +564,20 @@ class DatabaseConnection:
         command_type: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None
     ) -> int:
-        """Store a conversation message. Returns the conversation ID."""
+        """Store a conversation message.
+
+        Args:
+            phone_number: User's phone number.
+            session_id: UUID of the owning session.
+            role: ``'user'`` or ``'assistant'``.
+            content: Message text.
+            project_name: Project context, if any.
+            command_type: Command that produced this message.
+            metadata: Extra data (tokens, latency, etc.).
+
+        Returns:
+            The auto-incremented conversation ID.
+        """
         return await asyncio.to_thread(
             self._store_conversation_sync,
             phone_number,
@@ -624,7 +683,21 @@ class DatabaseConnection:
         source_conversation_id: Optional[int] = None,
         confidence: float = 1.0
     ) -> int:
-        """Store or update a user preference."""
+        """Store or update a user preference (upsert).
+
+        Args:
+            phone_number: User's phone number.
+            category: One of 'style', 'project', 'personal',
+                'technical'.
+            key: Preference key (unique per user+category).
+            value: Preference value.
+            source_conversation_id: Conversation that sourced
+                this preference.
+            confidence: Confidence score (0.0 to 1.0).
+
+        Returns:
+            The preference row ID.
+        """
         return await asyncio.to_thread(
             self._store_preference_sync,
             phone_number,
@@ -647,7 +720,8 @@ class DatabaseConnection:
         cursor = self._conn.cursor()
 
         cursor.execute("""
-            INSERT INTO preferences (phone_number, category, key, value, source_conversation_id, confidence)
+            INSERT INTO preferences
+            (phone_number, category, key, value, source_conversation_id, confidence)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(phone_number, category, key) DO UPDATE SET
                 value = excluded.value,
@@ -700,7 +774,10 @@ class DatabaseConnection:
                 confidence=row["confidence"],
                 source_conversation_id=row["source_conversation_id"],
                 created_at=self._parse_sqlite_timestamp(row["created_at"]),
-                last_used=self._parse_sqlite_timestamp(row["last_used"]) if row["last_used"] else None,
+                last_used=(
+                    self._parse_sqlite_timestamp(row["last_used"])
+                    if row["last_used"] else None
+                ),
                 use_count=row["use_count"]
             )
             for row in rows
@@ -714,7 +791,17 @@ class DatabaseConnection:
         tags: Optional[List[str]] = None,
         project_name: Optional[str] = None
     ) -> int:
-        """Store an explicit memory from /remember command."""
+        """Store an explicit memory from the /remember command.
+
+        Args:
+            phone_number: User's phone number.
+            memory_text: The text to remember.
+            tags: Optional categorization tags (stored as JSON).
+            project_name: Optional project association.
+
+        Returns:
+            The memory row ID.
+        """
         return await asyncio.to_thread(
             self._store_memory_sync,
             phone_number,
@@ -792,7 +879,18 @@ class DatabaseConnection:
 
     # Deletion operations
     async def delete_all_user_data(self, phone_number: str) -> int:
-        """Delete all data for a user. Returns count of deleted records."""
+        """Delete all data for a user across all tables.
+
+        Removes conversations, preferences, memories, autonomous
+        data (learnings, tasks, stories, PRDs), sessions, and the
+        user record itself.
+
+        Args:
+            phone_number: User's phone number.
+
+        Returns:
+            Total number of deleted rows across all tables.
+        """
         return await asyncio.to_thread(self._delete_all_user_data_sync, phone_number)
 
     def _delete_all_user_data_sync(self, phone_number: str) -> int:
@@ -858,7 +956,15 @@ class DatabaseConnection:
 
     # Embedding operations (for vector search)
     async def store_embedding(self, embedding: List[float]) -> Optional[int]:
-        """Store an embedding vector. Returns embedding ID or None if vec not available."""
+        """Store an embedding vector in the sqlite-vec table.
+
+        Args:
+            embedding: Float vector (384 dimensions for MiniLM).
+
+        Returns:
+            The embedding row ID, or None if sqlite-vec is not
+            available.
+        """
         if not self._has_vec:
             return None
         return await asyncio.to_thread(self._store_embedding_sync, embedding)
@@ -902,7 +1008,19 @@ class DatabaseConnection:
         query_embedding: List[float],
         limit: int = 10
     ) -> List[SearchResult]:
-        """Search conversations by embedding similarity."""
+        """Search conversations by embedding cosine similarity.
+
+        Uses sqlite-vec's ``vec_distance_cosine`` for ranked
+        retrieval. Returns empty list if sqlite-vec is unavailable.
+
+        Args:
+            phone_number: User's phone number (scope filter).
+            query_embedding: Query vector to compare against.
+            limit: Maximum results to return.
+
+        Returns:
+            Search results ranked by similarity (highest first).
+        """
         if not self._has_vec:
             return []
         return await asyncio.to_thread(
@@ -937,7 +1055,10 @@ class DatabaseConnection:
                 id=row["id"],
                 content=row["content"],
                 role=row["role"],
-                timestamp=self._parse_sqlite_timestamp(row["timestamp"]) or datetime.now(timezone.utc),
+                timestamp=(
+                    self._parse_sqlite_timestamp(row["timestamp"])
+                    or datetime.now(timezone.utc)
+                ),
                 project_name=row["project_name"],
                 similarity_score=max(0.0, min(1.0, 1 - row["distance"])),  # Clamp to [0, 1]
                 source_type="conversation"
@@ -951,7 +1072,18 @@ _db: Optional[DatabaseConnection] = None
 
 
 def get_database(db_path: Optional[Path] = None) -> DatabaseConnection:
-    """Get or create the global database instance."""
+    """Get or create the global database singleton.
+
+    Args:
+        db_path: Required on first call to set the database path.
+
+    Returns:
+        The global DatabaseConnection instance.
+
+    Raises:
+        ValueError: If called for the first time without a
+            db_path.
+    """
     global _db
     if _db is None:
         if db_path is None:
@@ -961,7 +1093,16 @@ def get_database(db_path: Optional[Path] = None) -> DatabaseConnection:
 
 
 async def initialize_database(db_path: Path) -> DatabaseConnection:
-    """Initialize and return the database."""
+    """Initialize and return the global database singleton.
+
+    Closes any existing connection before creating a new one.
+
+    Args:
+        db_path: Path to the SQLite database file.
+
+    Returns:
+        The initialized DatabaseConnection.
+    """
     global _db
     if _db is not None:
         try:

@@ -1,9 +1,7 @@
 """Tests that verify subprocess safety across the codebase."""
 
 import ast
-import pytest
 from pathlib import Path
-
 
 NIGHTWIRE_ROOT = Path(__file__).parent.parent.parent / "nightwire"
 
@@ -48,7 +46,7 @@ def test_no_shell_true_in_codebase():
     all_issues = []
     for py_file in NIGHTWIRE_ROOT.rglob("*.py"):
         all_issues.extend(_find_subprocess_calls(py_file))
-    assert all_issues == [], f"Unsafe subprocess calls found:\n" + "\n".join(all_issues)
+    assert all_issues == [], "Unsafe subprocess calls found:\n" + "\n".join(all_issues)
 
 
 def test_no_os_system_in_codebase():
@@ -57,4 +55,4 @@ def test_no_os_system_in_codebase():
     for py_file in NIGHTWIRE_ROOT.rglob("*.py"):
         issues = _find_subprocess_calls(py_file)
         all_issues.extend(i for i in issues if "os.system()" in i)
-    assert all_issues == [], f"os.system() calls found:\n" + "\n".join(all_issues)
+    assert all_issues == [], "os.system() calls found:\n" + "\n".join(all_issues)

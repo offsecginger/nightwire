@@ -7,14 +7,14 @@ failure notifications when the account hits its usage cap.
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Awaitable, Callable, List, Optional
 
 import structlog
 
 from .config import get_config
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.bot")
 
 # Default configuration values
 DEFAULT_COOLDOWN_MINUTES = 60
@@ -46,6 +46,12 @@ class CooldownManager:
     """
 
     def __init__(self):
+        """Initialize from rate_limit_cooldown settings.yaml section.
+
+        Reads enabled, cooldown_minutes, consecutive_threshold,
+        and failure_window_seconds from config with sensible
+        defaults.
+        """
         config = get_config()
         rl_config = config.settings.get("rate_limit_cooldown", {})
 
@@ -129,7 +135,14 @@ class CooldownManager:
             self._do_activate()
 
     def activate(self, cooldown_minutes: Optional[int] = None) -> None:
-        """Explicitly activate cooldown (e.g., from RATE_LIMITED error or /cooldown test)."""
+        """Explicitly activate cooldown.
+
+        Called when a RATE_LIMITED error is detected or via
+        ``/cooldown test``. Schedules auto-resume after expiry.
+
+        Args:
+            cooldown_minutes: Override duration (default from config).
+        """
         if not self.enabled:
             return
         self._do_activate(cooldown_minutes)
@@ -159,7 +172,12 @@ class CooldownManager:
             pass  # No running loop (e.g., in sync test context)
 
     def deactivate(self) -> None:
-        """Deactivate cooldown (manual clear or auto-resume)."""
+        """Deactivate cooldown and resume Claude operations.
+
+        Called by auto-resume timer or ``/cooldown clear``. Fires
+        on_deactivate callbacks to notify users and restart the
+        autonomous loop.
+        """
         was_active = self._active
         self._active = False
         self._expires_at = None

@@ -1,55 +1,42 @@
-"""Main entry point for nightwire."""
+"""Main entry point for nightwire.
+
+Initializes logging in two phases (defaults then config-driven),
+creates the SignalBot, and runs the async event loop with graceful
+shutdown on SIGTERM/SIGINT. Supports both Unix signal handlers and
+Windows SIGINT fallback.
+
+Key functions:
+    main: Async entry point -- sets up logging, config, bot, and
+        signal handlers, then runs the message polling loop.
+    run: Synchronous wrapper that calls asyncio.run(main()).
+"""
 
 import asyncio
-import logging
 import signal
 import sys
-from pathlib import Path
 
 import structlog
 
-
-def setup_logging():
-    """Configure structured logging."""
-    # Configure standard logging first
-    logging.basicConfig(
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        level=logging.INFO,
-        stream=sys.stdout
-    )
-
-    structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.processors.UnicodeDecoder(),
-            structlog.dev.ConsoleRenderer()
-        ],
-        wrapper_class=structlog.stdlib.BoundLogger,
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
-    )
+from .logging_config import setup_logging
 
 
 async def main():
     """Main async entry point."""
+    # Phase 1: defaults, cache_logger_on_first_use=False
     setup_logging()
-    logger = structlog.get_logger()
+    logger = structlog.get_logger("nightwire")
 
     logger.info("nightwire_starting", version="1.5.0")
 
     # Import here to ensure logging is configured first
-    from .config import get_config
     from .bot import SignalBot
+    from .config import get_config
 
     config = get_config()
     config.validate()
+
+    # Phase 2: reconfigure with real config, cache_logger_on_first_use=True
+    setup_logging(config)
 
     bot = SignalBot()
 
@@ -62,7 +49,16 @@ async def main():
         shutdown_event.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, handle_shutdown, sig)
+        try:
+            loop.add_signal_handler(sig, handle_shutdown, sig)
+        except NotImplementedError:
+            # Windows: add_signal_handler not supported.
+            # Fall back to signal.signal for SIGINT (Ctrl+C).
+            if sig == signal.SIGINT:
+                signal.signal(
+                    signal.SIGINT,
+                    lambda s, f: handle_shutdown(signal.SIGINT),
+                )
 
     # Run the bot
     try:
@@ -87,7 +83,7 @@ async def main():
 
 
 def run():
-    """Synchronous entry point."""
+    """Synchronous entry point for the ``nightwire`` console script."""
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

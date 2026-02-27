@@ -1,9 +1,24 @@
-"""Memory manager - central coordinator for all memory operations."""
+"""Central coordinator for all memory operations.
+
+Provides the high-level API for the memory subsystem. Orchestrates
+database storage, embedding generation, semantic search, context
+building, and Haiku-based summarization.
+
+Key class:
+    MemoryManager -- stores messages, manages preferences/memories,
+        performs semantic search, and builds context for prompt
+        injection.
+
+Module-level functions:
+    get_memory_manager() -- returns the global singleton instance.
+    initialize_memory_manager() -- creates and initializes the
+        global singleton.
+"""
 
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Any
+from typing import Any, List, Optional
 
 import structlog
 
@@ -11,14 +26,12 @@ from .database import DatabaseConnection, initialize_database
 from .embeddings import EmbeddingService
 from .models import (
     Conversation,
-    Preference,
     ExplicitMemory,
+    Preference,
     SearchResult,
-    MemoryContext,
-    Session,
 )
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.memory")
 
 
 class MemoryManager:
@@ -36,6 +49,17 @@ class MemoryManager:
         embedding_model: str = "all-MiniLM-L6-v2",
         enable_embeddings: bool = True
     ):
+        """Initialize the memory manager (call initialize() before use).
+
+        Args:
+            db_path: Path to the SQLite database file.
+            session_timeout_minutes: Minutes of inactivity before
+                a new session is created.
+            max_context_tokens: Token budget for context injection.
+            embedding_model: sentence-transformers model name.
+            enable_embeddings: If False, disables vector search
+                and falls back to keyword matching.
+        """
         self.db_path = db_path
         self.session_timeout = session_timeout_minutes
         self.max_context_tokens = max_context_tokens
@@ -47,7 +71,14 @@ class MemoryManager:
         self._init_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
-        """Initialize the memory system."""
+        """Initialize the database and embedding service.
+
+        Thread-safe via double-checked locking. Safe to call
+        multiple times; subsequent calls are no-ops.
+
+        Raises:
+            Exception: If database initialization fails.
+        """
         if self._initialized:
             return
         async with self._init_lock:
@@ -120,6 +151,7 @@ class MemoryManager:
             project_name,
             self.session_timeout
         )
+        logger.debug("session_resolved", session_id=session.id, is_new=session.message_count == 0)
 
         # Store the conversation
         conv_id = await self.db.store_conversation(
@@ -340,6 +372,14 @@ class MemoryManager:
                     source_type="conversation"
                 ))
 
+        top_score = results_with_scores[0][1] if results_with_scores else 0.0
+        logger.debug(
+            "vector_search_results",
+            query_length=len(query),
+            results_count=len(results),
+            top_score=round(top_score, 3),
+        )
+
         return results
 
     def _keyword_search(
@@ -481,7 +521,18 @@ class MemoryManager:
         return False
 
     async def close(self) -> None:
-        """Close the memory system."""
+        """Shut down the memory system.
+
+        Closes the Haiku summarizer's HTTP client and the
+        SQLite database connection. Resets the initialized flag
+        so the manager can be re-initialized if needed.
+        """
+        try:
+            from .haiku_summarizer import close_summarizer
+            await close_summarizer()
+        except Exception as e:
+            logger.warning("haiku_summarizer_close_error", error=str(e))
+
         if self._db:
             await self._db.close()
             self._initialized = False
@@ -493,7 +544,12 @@ _memory_manager: Optional[MemoryManager] = None
 
 
 def get_memory_manager() -> Optional[MemoryManager]:
-    """Get the global memory manager instance."""
+    """Get the global memory manager instance.
+
+    Returns:
+        The MemoryManager singleton, or None if not yet
+        initialized.
+    """
     return _memory_manager
 
 
@@ -502,7 +558,16 @@ async def initialize_memory_manager(
     session_timeout_minutes: int = 30,
     max_context_tokens: int = 1500
 ) -> MemoryManager:
-    """Initialize and return the global memory manager."""
+    """Create, initialize, and return the global memory manager.
+
+    Args:
+        db_path: Path to the SQLite database file.
+        session_timeout_minutes: Session inactivity timeout.
+        max_context_tokens: Token budget for context injection.
+
+    Returns:
+        The initialized MemoryManager singleton.
+    """
     global _memory_manager
     _memory_manager = MemoryManager(
         db_path,

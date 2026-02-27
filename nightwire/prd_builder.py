@@ -1,4 +1,16 @@
-"""PRD (Product Requirements Document) builder - JSON parsing and PRD creation from Claude output."""
+"""PRD (Product Requirements Document) builder.
+
+Robust JSON parsing for Claude-generated PRD breakdowns. Handles
+common LLM output quirks: markdown code fences, smart quotes,
+trailing commas, embedded comments, and unbalanced braces. Includes
+a retry path that asks Claude to fix malformed JSON.
+
+Key functions:
+    parse_prd_json: Parse PRD JSON with multi-stage cleanup + retry.
+    extract_balanced_json: Brace-matching JSON object extraction.
+    clean_json_string: Fix common LLM JSON syntax issues.
+    is_complex_task: Heuristic for autonomous system routing.
+"""
 
 import json
 import re
@@ -6,11 +18,22 @@ from typing import Optional
 
 import structlog
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.bot")
 
 
 def clean_json_string(json_str: str) -> str:
-    """Clean common JSON issues from LLM output."""
+    """Clean common JSON issues from LLM output.
+
+    Fixes: markdown code fences, smart quotes, single-line
+    comments, trailing commas, control characters, unescaped
+    backslashes, and raw newlines inside strings.
+
+    Args:
+        json_str: Raw JSON string from LLM output.
+
+    Returns:
+        Cleaned string that is more likely to parse as JSON.
+    """
     # Remove markdown code blocks if present
     json_str = re.sub(r'^```(?:json)?\s*', '', json_str.strip())
     json_str = re.sub(r'\s*```$', '', json_str)
@@ -61,7 +84,17 @@ def clean_json_string(json_str: str) -> str:
 
 
 def extract_balanced_json(text: str) -> Optional[str]:
-    """Extract the first balanced top-level JSON object from text using brace matching."""
+    """Extract the first balanced top-level JSON object from text.
+
+    Uses brace counting with string-escape awareness. Falls back
+    to first-'{' to last-'}' if braces are unbalanced.
+
+    Args:
+        text: Text potentially containing a JSON object.
+
+    Returns:
+        Extracted JSON substring, or None if no '{' found.
+    """
     start = text.find('{')
     if start == -1:
         return None
@@ -123,7 +156,11 @@ def is_complex_task(task_description: str) -> bool:
     ]
 
     keyword_matches = sum(1 for kw in complexity_keywords if kw in desc_lower)
-    sentence_count = task_description.count('.') + task_description.count('!') + task_description.count('?')
+    sentence_count = (
+        task_description.count('.')
+        + task_description.count('!')
+        + task_description.count('?')
+    )
     has_multiple_also = desc_lower.count(' also ') >= 2
 
     if keyword_matches >= 3:
@@ -167,7 +204,10 @@ async def parse_prd_json(response: str, runner, update_step) -> dict:
     parse_attempts = [
         ("basic", lambda s: s),
         ("cleaned", clean_json_string),
-        ("re-extracted", lambda s: extract_balanced_json(clean_json_string(s)) or clean_json_string(s)),
+        (
+            "re-extracted",
+            lambda s: extract_balanced_json(clean_json_string(s)) or clean_json_string(s),
+        ),
     ]
 
     last_error = None
@@ -193,15 +233,21 @@ async def parse_prd_json(response: str, runner, update_step) -> dict:
                 truncate_at = candidate + 1
                 break
         json_preview = json_str[:truncate_at]
-        truncated_note = f"\n\n[TRUNCATED at {truncate_at} of {len(json_str)} chars. Complete the JSON structure with proper closing braces/brackets.]"
+        truncated_note = (
+            f"\n\n[TRUNCATED at {truncate_at} of {len(json_str)}"
+            f" chars. Complete the JSON structure with proper"
+            f" closing braces/brackets.]"
+        )
 
-    fix_prompt = f"""The following JSON has a syntax error. Fix ONLY the JSON syntax and return valid JSON.
-Do not add any explanation, just return the corrected JSON.
-
-Error: {str(last_error)[:200]}
-
-JSON to fix:
-{json_preview}{truncated_note}"""
+    fix_prompt = (
+        "The following JSON has a syntax error."
+        " Fix ONLY the JSON syntax and return valid JSON.\n"
+        "Do not add any explanation, just return the"
+        " corrected JSON.\n\n"
+        f"Error: {str(last_error)[:200]}\n\n"
+        f"JSON to fix:\n"
+        f"{json_preview}{truncated_note}"
+    )
 
     try:
         success, fix_response = await runner.run_claude(fix_prompt, timeout=60)

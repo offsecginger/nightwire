@@ -1,20 +1,37 @@
-"""Project management for Signal Claude Bot."""
+"""Project management for Signal Claude Bot.
 
-import os
+Manages per-phone project selection, registration, creation, and
+access control. Each authorized user can select one active project
+at a time; Claude commands execute against that project's directory.
+
+Key classes:
+    ProjectManager: Per-phone project state, registration, and
+        access control with path validation.
+
+Key functions:
+    get_project_manager: Singleton accessor for the global instance.
+"""
+
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import structlog
 
 from .config import get_config
 from .security import validate_project_path
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.bot")
 
 
 class ProjectManager:
-    """Manages project selection and registration with per-phone scoping."""
+    """Manages project selection and registration with per-phone scoping.
+
+    Wraps Config for project CRUD and adds per-phone state tracking.
+    All path mutations go through security.validate_project_path()
+    to prevent directory traversal. Projects can optionally restrict
+    access to specific phone numbers via allowed_numbers lists.
+    """
 
     def __init__(self):
         self.config = get_config()
@@ -70,12 +87,24 @@ class ProjectManager:
             lines.append(f"  {p['name']}{marker}{desc}")
 
         if current:
-            lines.append(f"\n* = currently selected")
+            lines.append("\n* = currently selected")
 
         return "\n".join(lines)
 
     def select_project(self, name: str, phone_number: str) -> Tuple[bool, str]:
-        """Select a project to work on."""
+        """Select a project to work on.
+
+        Looks up by name (case-insensitive), auto-registers if
+        found under projects_base_path, validates access control
+        and path security.
+
+        Args:
+            name: Project name or directory name.
+            phone_number: Requesting user's phone/UUID.
+
+        Returns:
+            Tuple of (success, user-facing message).
+        """
         name = name.strip().lower()
 
         # First check registered projects (case-insensitive)
@@ -112,7 +141,7 @@ class ProjectManager:
         # Validate the path is allowed
         validated_path = validate_project_path(str(path))
         if validated_path is None:
-            return False, f"Project path is not within the allowed directory."
+            return False, "Project path is not within the allowed directory."
 
         if not validated_path.exists():
             return False, f"Project directory does not exist: {validated_path}"
@@ -124,8 +153,19 @@ class ProjectManager:
 
         return True, f"Selected: {matched_name}\nPath: {validated_path}"
 
-    def add_project(self, name: str, path: str = None, description: str = "") -> Tuple[bool, str]:
-        """Add a new project to the registry."""
+    def add_project(
+        self, name: str, path: str = None, description: str = ""
+    ) -> Tuple[bool, str]:
+        """Add a new project to the registry.
+
+        Args:
+            name: Project name.
+            path: Absolute path (defaults to projects_base_path/name).
+            description: Optional one-line description.
+
+        Returns:
+            Tuple of (success, user-facing message).
+        """
         if path is None:
             # Assume it's a directory under the projects base path
             path = str(self.config.projects_base_path / name)
@@ -175,17 +215,35 @@ class ProjectManager:
 
         return True, f"Removed project: {matched_name}"
 
-    def create_project(self, name: str, phone_number: str, description: str = "") -> Tuple[bool, str]:
-        """Create a new project directory and select it."""
+    def create_project(
+        self, name: str, phone_number: str, description: str = "",
+    ) -> Tuple[bool, str]:
+        """Create a new project directory and select it.
+
+        Args:
+            name: Project name (alphanumeric, dots, hyphens,
+                underscores; max 64 chars).
+            phone_number: Requesting user's phone/UUID.
+            description: Optional one-line description.
+
+        Returns:
+            Tuple of (success, user-facing message).
+        """
         # Validate name with positive allowlist
         if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$', name) or len(name) > 64:
-            return False, "Invalid project name. Use alphanumeric characters, dots, hyphens, or underscores (max 64 chars)."
+            return False, (
+                "Invalid project name. Use alphanumeric characters,"
+                " dots, hyphens, or underscores (max 64 chars)."
+            )
 
         # Create path under projects base
         project_path = self.config.projects_base_path / name
 
         if project_path.exists():
-            return False, f"Directory already exists: {project_path}\nUse /select {name} to select it."
+            return False, (
+                f"Directory already exists: {project_path}"
+                f"\nUse /select {name} to select it."
+            )
 
         try:
             # Create the directory
@@ -198,7 +256,12 @@ class ProjectManager:
             # Select it for this user
             self._current_projects[phone_number] = (name, project_path)
 
-            return True, f"Created and selected new project: {name}\nPath: {project_path}\n\nReady for Claude! Send a message describing what to build."
+            return True, (
+                f"Created and selected new project: {name}"
+                f"\nPath: {project_path}"
+                f"\n\nReady for Claude! Send a message"
+                f" describing what to build."
+            )
 
         except Exception as e:
             logger.error("project_create_error", name=name, error=str(e))

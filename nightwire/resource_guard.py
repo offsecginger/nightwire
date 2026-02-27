@@ -1,10 +1,26 @@
-"""Resource guard — checks system resources before spawning workers."""
+"""Resource guard -- checks system resources before spawning workers.
+
+Uses psutil (optional dependency) to verify that memory and CPU
+are sufficient before the autonomous loop dispatches a new parallel
+task worker. Falls back gracefully if psutil is not installed.
+
+Key classes:
+    ResourceStatus: Dataclass snapshot of a resource check result.
+
+Key functions:
+    check_resources: Perform a single resource check and return
+        a ResourceStatus indicating whether a worker can spawn.
+
+Constants:
+    MAX_MEMORY_PERCENT: Refuse to spawn above this threshold (90%).
+    MIN_AVAILABLE_MB: Require at least this much free RAM (512 MB).
+"""
 
 from dataclasses import dataclass
 
 import structlog
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.bot")
 
 # Thresholds
 MAX_MEMORY_PERCENT = 90  # Don't spawn if memory > 90%
@@ -13,7 +29,15 @@ MIN_AVAILABLE_MB = 512   # Need at least 512MB free
 
 @dataclass
 class ResourceStatus:
-    """Result of a resource check."""
+    """Snapshot result of a system resource check.
+
+    Attributes:
+        ok: True if resources are sufficient to spawn a worker.
+        memory_percent: Current memory usage percentage.
+        memory_available_mb: Free memory in megabytes.
+        cpu_count: Number of logical CPUs.
+        reason: Human-readable explanation when ok is False.
+    """
     ok: bool
     memory_percent: float
     memory_available_mb: float

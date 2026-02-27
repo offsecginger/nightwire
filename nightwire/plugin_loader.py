@@ -1,11 +1,19 @@
-"""Plugin discovery, loading, and lifecycle management."""
+"""Plugin discovery, loading, and lifecycle management.
+
+Scans the plugins directory for ``plugin.py`` files, instantiates
+NightwirePlugin subclasses, and collects their commands, message
+matchers, and help sections. Manages start/stop lifecycle hooks.
+
+Key classes:
+    PluginLoader: Discovers, loads, validates, and manages plugins.
+"""
 
 import importlib
 import importlib.util
 import re
 import sys
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List
 
 import structlog
 
@@ -15,10 +23,9 @@ from .plugin_base import (
     MessageMatcher,
     NightwirePlugin,
     PluginContext,
-    SidechannelPlugin,
 )
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.plugins")
 
 # Register 'nightwire' as the canonical module name and alias 'sidechannel'
 # for backwards compatibility, so plugins can use either
@@ -49,6 +56,15 @@ class PluginLoader:
         allowed_numbers: List[str],
         data_dir: Path,
     ):
+        """Initialize the plugin loader.
+
+        Args:
+            plugins_dir: Directory to scan for plugin subdirs.
+            settings: Full settings.yaml dict (passed to contexts).
+            send_message: Async callback for sending Signal messages.
+            allowed_numbers: Authorized phone numbers/UUIDs.
+            data_dir: Base data directory for plugin storage.
+        """
         self.plugins_dir = plugins_dir
         self._settings = settings
         self._send_message = send_message
@@ -60,7 +76,12 @@ class PluginLoader:
         self._help: List[HelpSection] = []
 
     def discover_and_load(self) -> None:
-        """Scan plugins_dir for plugin.py files and load them."""
+        """Scan plugins_dir for plugin.py files and load them.
+
+        Respects the ``plugin_allowlist`` setting and per-plugin
+        ``enabled`` flags. Validates command names against
+        BUILTIN_COMMANDS to prevent override conflicts.
+        """
         if not self.plugins_dir.is_dir():
             logger.info("plugin_loader_no_dir", path=str(self.plugins_dir))
             return
@@ -154,20 +175,18 @@ class PluginLoader:
         self.plugins.append(plugin)
 
         # Collect commands (with validation)
-        BUILTIN_COMMANDS = frozenset({
-            "help", "projects", "select", "add", "new", "ask", "do",
-            "complex", "cancel", "summary", "remember", "recall",
-            "history", "forget", "memories", "preferences", "global",
-            "prd", "story", "task", "tasks", "autonomous", "queue",
-            "learnings", "status",
-        })
+        from .commands.base import BUILTIN_COMMANDS
 
         for cmd_name, handler in plugin.commands().items():
             if not re.match(r'^[a-z][a-z0-9_-]*$', cmd_name):
                 logger.warning("plugin_invalid_command_name", command=cmd_name, plugin=plugin_name)
                 continue
             if cmd_name in BUILTIN_COMMANDS:
-                logger.warning("plugin_builtin_override_blocked", command=cmd_name, plugin=plugin_name)
+                logger.warning(
+                    "plugin_builtin_override_blocked",
+                    command=cmd_name,
+                    plugin=plugin_name,
+                )
                 continue
             if cmd_name in self._commands:
                 logger.warning(

@@ -1,10 +1,8 @@
 """Tests for Docker sandbox module."""
 
-import pytest
 from pathlib import Path
-from unittest.mock import patch
 
-from nightwire.sandbox import build_sandbox_command, SandboxConfig
+from nightwire.sandbox import SandboxConfig, build_sandbox_command
 
 
 def test_build_sandbox_command_wraps_with_docker():

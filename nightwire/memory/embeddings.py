@@ -1,11 +1,24 @@
-"""Embedding service for semantic search using sentence-transformers."""
+"""Embedding service for semantic search using sentence-transformers.
+
+Provides text-to-vector conversion for the memory subsystem's
+semantic search. The model is lazily loaded on first use to avoid
+startup delay. All encoding runs in a thread pool to keep the
+asyncio event loop unblocked.
+
+Key class:
+    EmbeddingService -- generates embeddings for single texts or
+        batches, and computes cosine similarity between vectors.
+
+Module-level function:
+    get_embedding_service() -- returns the global singleton.
+"""
 
 import asyncio
 from typing import List, Optional
 
 import structlog
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.memory")
 
 
 class EmbeddingService:
@@ -28,7 +41,12 @@ class EmbeddingService:
 
     @property
     def model(self):
-        """Lazy load the embedding model."""
+        """Lazy-load and return the sentence-transformers model.
+
+        Raises:
+            RuntimeError: If sentence-transformers is not
+                installed.
+        """
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer
@@ -104,7 +122,15 @@ class EmbeddingService:
         Returns:
             List of floats representing the embedding
         """
-        return await asyncio.to_thread(self._embed_sync, text)
+        import time
+        start = time.monotonic()
+        result = await asyncio.to_thread(self._embed_sync, text)
+        elapsed_ms = (time.monotonic() - start) * 1000
+        logger.debug(
+            "embedding_generated", text_length=len(text),
+            dimension=len(result), time_ms=round(elapsed_ms, 1),
+        )
+        return result
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for multiple texts.

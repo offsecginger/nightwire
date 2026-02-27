@@ -1,15 +1,19 @@
-"""Auto-update module for nightwire."""
+"""Auto-update module for nightwire.
+
+Polls GitHub for new commits on a configurable branch, notifies the admin
+via Signal, and applies updates on demand with automatic rollback on failure.
+"""
 
 import asyncio
 import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, Awaitable, Optional
+from typing import Awaitable, Callable, Optional
 
 import structlog
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.bot")
 
 # Exit code to signal intentional restart for update
 EXIT_CODE_UPDATE = 75

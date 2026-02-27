@@ -1,50 +1,83 @@
-"""Signal bot implementation for nightwire."""
+"""Signal bot implementation for nightwire.
+
+Connects to Signal CLI REST API via WebSocket, dispatches incoming
+messages through the command handler registry, plugin system, and
+default Claude handler. Manages lifecycle for all subsystems:
+memory, autonomous, plugins, cooldown, and auto-updater.
+
+Key classes:
+    SignalBot: Main bot class -- owns all subsystem instances and
+        the message processing pipeline.
+
+Key functions:
+    _make_memory_commands: Factory for memory command handlers
+        with per-phone project context injection.
+"""
 
 import asyncio
 import hashlib
 import json
 import time as _time
 from collections import OrderedDict
-from datetime import datetime
+from functools import partial
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 from urllib.parse import urlparse
 
 import aiohttp
 import structlog
 
-from .config import get_config
-from .security import is_authorized, sanitize_input, check_rate_limit
 from .claude_runner import get_runner
-from .project_manager import get_project_manager
-from .memory import MemoryManager, MemoryCommands
-from .autonomous import AutonomousManager, AutonomousCommands
+from .commands.base import BotContext, HandlerRegistry
+from .commands.core import CoreCommandHandler, get_memory_context
+from .config import get_config
+from .memory import MemoryCommands, MemoryManager
 from .plugin_loader import PluginLoader
-from .updater import AutoUpdater
+from .project_manager import get_project_manager
 from .rate_limit_cooldown import get_cooldown_manager
-from .prd_builder import clean_json_string, extract_balanced_json, parse_prd_json
+from .security import check_rate_limit, is_authorized, sanitize_input
+from .task_manager import TaskManager, log_task_exception
+from .updater import AutoUpdater
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.bot")
 
 
-def _log_task_exception(task: asyncio.Task):
-    """Log exceptions from fire-and-forget tasks instead of silently swallowing them."""
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc:
-        logger.error("background_task_failed", error=str(exc), exc_type=type(exc).__name__)
+def _make_memory_commands(memory_commands, project_manager):
+    """Create command dict with project context injection for memory handlers."""
+    def _with_project(handler):
+        async def wrapper(sender, args):
+            project = project_manager.get_current_project(sender)
+            return await handler(sender, args, project=project)
+        return wrapper
+
+    return {
+        "remember": _with_project(memory_commands.handle_remember),
+        "recall": _with_project(memory_commands.handle_recall),
+        "history": _with_project(memory_commands.handle_history),
+        "forget": memory_commands.handle_forget,
+        "memories": _with_project(memory_commands.handle_memories),
+        "preferences": memory_commands.handle_preferences,
+    }
 
 
 class SignalBot:
-    """Signal bot that interfaces with Claude."""
+    """Signal bot with command handler registry.
+
+    Owns the full message lifecycle: WebSocket connection, message
+    deduplication, authorization, rate limiting, command routing
+    (via HandlerRegistry), plugin dispatch, and response delivery.
+
+    Subsystems (memory, autonomous, plugins, cooldown, updater)
+    are initialized in two phases: __init__ for sync setup and
+    start() for async initialization requiring the event loop.
+    """
 
     def __init__(self):
         self.config = get_config()
         self.runner = get_runner()
         self.project_manager = get_project_manager()
 
-        # nightwire assistant runner is optional (supports OpenAI and Grok providers)
+        # nightwire assistant runner is optional
         self.nightwire_runner = None
         if self.config.nightwire_assistant_enabled:
             try:
@@ -68,22 +101,18 @@ class SignalBot:
         self.account: Optional[str] = None
         self._processed_messages = OrderedDict()  # Dedup: msg_hash -> timestamp
 
-        # Per-sender task state tracking - allows concurrent tasks across users
-        # Key: sender phone number, Value: dict with task, description, start, step
-        self._sender_tasks: Dict[str, dict] = {}
-
         # Memory system
         memory_db_path = Path(self.config.config_dir).parent / "data" / "memory.db"
         self.memory = MemoryManager(
             db_path=memory_db_path,
             session_timeout_minutes=self.config.memory_session_timeout,
-            max_context_tokens=self.config.memory_max_context_tokens
+            max_context_tokens=self.config.memory_max_context_tokens,
         )
         self.memory_commands = MemoryCommands(self.memory)
 
         # Autonomous system (initialized after memory in start())
-        self.autonomous_manager: Optional[AutonomousManager] = None
-        self.autonomous_commands: Optional[AutonomousCommands] = None
+        self.autonomous_manager = None
+        self.autonomous_commands = None
 
         # Auto-updater (initialized in start() if enabled)
         self.updater: Optional[AutoUpdater] = None
@@ -103,16 +132,65 @@ class SignalBot:
         )
         self.plugin_loader.discover_and_load()
 
+        # --- Command handler infrastructure ---
+
+        # Standalone memory context function (no circular dep)
+        get_mem_ctx = partial(
+            get_memory_context, self.memory, self.config, self.project_manager
+        )
+
+        # TaskManager — background task lifecycle
+        self.task_manager = TaskManager(
+            runner=self.runner,
+            project_manager=self.project_manager,
+            memory=self.memory,
+            config=self.config,
+            send_message=self._send_message,
+            get_memory_context=get_mem_ctx,
+        )
+
+        # BotContext — dependency container for handlers
+        self._bot_context = BotContext(
+            config=self.config,
+            runner=self.runner,
+            project_manager=self.project_manager,
+            memory=self.memory,
+            memory_commands=self.memory_commands,
+            plugin_loader=self.plugin_loader,
+            send_message=self._send_message,
+            task_manager=self.task_manager,
+            get_memory_context=get_mem_ctx,
+            nightwire_runner=self.nightwire_runner,
+        )
+
+        # Handler registry — core + memory registered now, autonomous in start()
+        self._registry = HandlerRegistry()
+        self._core_handler = CoreCommandHandler(self._bot_context)
+        self._registry.register(self._core_handler)
+        self._registry.register_external(
+            _make_memory_commands(self.memory_commands, self.project_manager)
+        )
+
     async def start(self):
-        """Start the bot."""
+        """Start the bot and all subsystems.
+
+        Initializes the HTTP session, memory system, autonomous
+        manager, plugins, auto-updater, and cooldown manager.
+        Registers deferred command handlers (autonomous).
+        """
         self.session = aiohttp.ClientSession()
         self.running = True
 
         # Warn if non-localhost Signal API is not using HTTPS
         parsed = urlparse(self.config.signal_api_url)
-        if parsed.hostname not in ("127.0.0.1", "localhost", "::1") and parsed.scheme != "https":
-            logger.warning("insecure_signal_api_url", url=self.config.signal_api_url,
-                           msg="Non-localhost Signal API should use HTTPS")
+        if (
+            parsed.hostname not in ("127.0.0.1", "localhost", "::1")
+            and parsed.scheme != "https"
+        ):
+            logger.warning(
+                "insecure_signal_api_url", url=self.config.signal_api_url,
+                msg="Non-localhost Signal API should use HTTPS",
+            )
 
         # Get the registered account
         await self._get_account()
@@ -121,6 +199,8 @@ class SignalBot:
         await self.memory.initialize()
 
         # Initialize autonomous system (uses same DB connection)
+        from .autonomous import AutonomousCommands, AutonomousManager
+
         async def autonomous_notify(phone: str, message: str):
             await self._send_message(phone, message)
 
@@ -153,7 +233,6 @@ class SignalBot:
         self.cooldown_manager = get_cooldown_manager()
 
         async def _cooldown_on_activate():
-            """Pause autonomous loop and notify users on cooldown."""
             if self.autonomous_manager:
                 await self.autonomous_manager.pause_loop()
             state = self.cooldown_manager.get_state()
@@ -161,20 +240,19 @@ class SignalBot:
                 try:
                     await self._send_message(
                         phone,
-                        f"Rate limit cooldown activated. {state.user_message}"
+                        f"Rate limit cooldown activated. {state.user_message}",
                     )
                 except Exception as e:
                     logger.warning("cooldown_notify_error", error=str(e))
 
         async def _cooldown_on_deactivate():
-            """Resume autonomous loop and notify users when cooldown ends."""
             if self.autonomous_manager:
                 await self.autonomous_manager.start_loop()
             for phone in self.config.allowed_numbers:
                 try:
                     await self._send_message(
                         phone,
-                        "Rate limit cooldown expired. Claude operations resumed."
+                        "Rate limit cooldown expired. Claude operations resumed.",
                     )
                 except Exception as e:
                     logger.warning("cooldown_notify_error", error=str(e))
@@ -182,14 +260,38 @@ class SignalBot:
         self.cooldown_manager.on_activate(_cooldown_on_activate)
         self.cooldown_manager.on_deactivate(_cooldown_on_deactivate)
 
+        # Update BotContext with deferred dependencies
+        self._bot_context._autonomous_manager = self.autonomous_manager
+        self._bot_context._autonomous_commands = self.autonomous_commands
+        self._bot_context._updater = self.updater
+        self._bot_context._cooldown_manager = self.cooldown_manager
+
+        # Update TaskManager with autonomous_manager
+        self.task_manager.autonomous_manager = self.autonomous_manager
+
+        # Register autonomous commands (now that they exist)
+        self._registry.register_external({
+            "prd": self.autonomous_commands.handle_prd,
+            "story": self.autonomous_commands.handle_story,
+            "task": self.autonomous_commands.handle_task,
+            "tasks": self.autonomous_commands.handle_tasks,
+            "autonomous": self.autonomous_commands.handle_autonomous,
+            "queue": self.autonomous_commands.handle_queue,
+            "learnings": self.autonomous_commands.handle_learnings,
+        })
+
         logger.info("bot_started", account=self.account)
 
     async def stop(self):
-        """Stop the bot."""
+        """Stop the bot and clean up all resources.
+
+        Stops plugins, cancels cooldown timer, stops updater and
+        autonomous loop, closes runners and HTTP session, then
+        closes the memory system.
+        """
         if not self.running:
             return
         self.running = False
-        # Stop plugins
         await self.plugin_loader.stop_all()
         if self.cooldown_manager:
             self.cooldown_manager.cancel_timer()
@@ -202,780 +304,129 @@ class SignalBot:
         if self.session:
             await self.session.close()
         await self.runner.cancel()
+        await self.runner.close()
         await self.memory.close()
         logger.info("bot_stopped")
 
     async def _get_account(self):
-        """Get the registered Signal account with retry.
-
-        Retries on connection errors and timeouts (signal-api may still be
-        starting).  Does NOT retry when signal-api responds 200 with an
-        empty account list (it's up but unconfigured).
-        """
-        url = f"{self.config.signal_api_url}/v1/accounts"
+        """Get the registered Signal account with retry."""
         max_attempts = 12
         base_delay = 5
         max_delay = 15
 
         for attempt in range(1, max_attempts + 1):
             try:
+                url = f"{self.config.signal_api_url}/v1/accounts"
                 async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
                         accounts = await resp.json()
                         if accounts:
-                            self.account = accounts[0]
+                            acct = accounts[0]
+                            self.account = acct if isinstance(acct, str) else acct.get("number")
                             logger.info("account_found", account=self.account)
                             return
                         else:
-                            # Signal API is up but no accounts registered — don't retry
-                            logger.error("no_accounts_registered")
+                            logger.warning("no_accounts_registered")
                             return
                     else:
-                        logger.warning(
-                            "accounts_request_failed",
-                            status=resp.status,
-                            attempt=attempt,
-                            max_attempts=max_attempts,
-                        )
+                        logger.warning("account_request_failed", status=resp.status)
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                delay = min(base_delay * attempt, max_delay)
+                logger.warning(
+                    "account_request_error", error=str(e),
+                    attempt=attempt, retry_delay=delay,
+                )
                 if attempt < max_attempts:
-                    delay = min(base_delay * attempt, max_delay)
-                    logger.warning(
-                        "accounts_request_retry",
-                        error=str(e),
-                        attempt=attempt,
-                        max_attempts=max_attempts,
-                        retry_in=delay,
-                    )
                     await asyncio.sleep(delay)
-                else:
-                    logger.error(
-                        "accounts_request_error",
-                        error=str(e),
-                        attempts_exhausted=max_attempts,
-                    )
-                    return
-            except Exception as e:
-                logger.error("accounts_request_error", error=str(e))
-                return
+
+        logger.error("account_request_failed_all_attempts", attempts=max_attempts)
 
     async def _send_message(self, recipient: str, message: str):
-        """Send a message via Signal."""
-        if not self.account:
-            logger.error("no_account_for_sending")
-            return
-
-        # SECURITY: Double-check recipient is authorized before sending
+        """Send a message via Signal API."""
         if not is_authorized(recipient):
-            logger.warning("blocked_send_to_unauthorized", recipient="..." + recipient[-4:])
+            logger.warning("send_blocked_unauthorized", recipient="..." + recipient[-4:])
             return
 
-        # Add nightwire identifier to all messages
         message = f"[nightwire] {message}"
-
+        payload = {
+            "message": message,
+            "number": self.account,
+            "recipients": [recipient],
+        }
         try:
             url = f"{self.config.signal_api_url}/v2/send"
-            payload = {
-                "number": self.account,
-                "recipients": [recipient],
-                "message": message
-            }
-
             async with self.session.post(url, json=payload) as resp:
-                if resp.status == 201:
-                    logger.info("message_sent", recipient="..." + recipient[-4:])
-                else:
-                    text = await resp.text()
-                    logger.error("send_failed", status=resp.status, response=text)
-
+                if resp.status != 201:
+                    body = await resp.text()
+                    logger.warning("send_failed", status=resp.status, body=body[:200])
         except Exception as e:
             logger.error("send_error", error=str(e))
 
-    async def _handle_command(self, command: str, args: str, sender: str) -> str:
-        """Handle a bot command."""
-        command = command.lower()
-
-        if command == "help":
-            return self._get_help()
-
-        elif command == "projects":
-            return self.project_manager.list_projects(sender)
-
-        elif command == "select":
-            if not args:
-                return "Usage: /select <project_name>"
-            success, msg = self.project_manager.select_project(args, sender)
-            if success:
-                self.runner.set_project(self.project_manager.get_current_path(sender))
-            return msg
-
-        elif command == "status":
-            status = self.project_manager.get_status(sender)
-            # Add running task info (direct /do tasks) for this sender
-            task_state = self._sender_tasks.get(sender)
-            if task_state and task_state.get("task") and not task_state["task"].done():
-                elapsed = ""
-                if task_state.get("start"):
-                    mins = int((datetime.now() - task_state["start"]).total_seconds() / 60)
-                    elapsed = f" ({mins}m)"
-                desc = task_state.get("description", "unknown")[:120]
-                status += f"\n\nActive Task{elapsed}: {desc}"
-                if task_state.get("step"):
-                    status += f"\nStep: {task_state['step']}"
-
-            # Add autonomous loop status
-            try:
-                loop_status = await self.autonomous_manager.get_loop_status()
-                if loop_status.is_running:
-                    auto_info = "\n\nAutonomous Loop: Running"
-                    if loop_status.current_task_id:
-                        current_task = await self.autonomous_manager.db.get_task(loop_status.current_task_id)
-                        if current_task:
-                            elapsed_auto = ""
-                            if current_task.started_at:
-                                mins = int((datetime.now() - current_task.started_at).total_seconds() / 60)
-                                elapsed_auto = f" ({mins}m)"
-                            auto_info += f"\nCurrent: {current_task.title[:50]}{elapsed_auto}"
-                    auto_info += f"\nQueued: {loop_status.tasks_queued}"
-                    auto_info += f" | Done: {loop_status.tasks_completed_today}"
-                    if loop_status.tasks_failed_today > 0:
-                        auto_info += f" | Failed: {loop_status.tasks_failed_today}"
-                    status += auto_info
-                elif loop_status.is_paused:
-                    status += "\n\nAutonomous Loop: Paused"
-            except Exception as e:
-                logger.warning("status_autonomous_error", error=str(e))
-
-            # Add cooldown info if active
-            if self.cooldown_manager and self.cooldown_manager.is_active:
-                state = self.cooldown_manager.get_state()
-                status += f"\n\nRate Limit Cooldown: Active (~{state.remaining_minutes} min remaining)"
-
-            return status
-
-        elif command == "add":
-            if not args:
-                return "Usage: /add <project_name> [path] [description]"
-            parts = args.split(maxsplit=2)
-            name = parts[0]
-            path = parts[1] if len(parts) > 1 else None
-            desc = parts[2] if len(parts) > 2 else ""
-            success, msg = self.project_manager.add_project(name, path, desc)
-            return msg
-
-        elif command == "remove":
-            if not args:
-                return "Usage: /remove <project_name>"
-            success, msg = self.project_manager.remove_project(args)
-            if success and self.project_manager.get_current_project(sender) is None:
-                self.runner.set_project(None)
-            return msg
-
-        elif command == "new":
-            if not args:
-                return "Usage: /new <project_name> [description]"
-            parts = args.split(maxsplit=1)
-            name = parts[0]
-            desc = parts[1] if len(parts) > 1 else ""
-            success, msg = self.project_manager.create_project(name, sender, desc)
-            if success:
-                self.runner.set_project(self.project_manager.get_current_path(sender))
-            return msg
-
-        elif command == "ask":
-            if not args:
-                return "Usage: /ask <question about the project>"
-            if self.cooldown_manager and self.cooldown_manager.is_active:
-                return self.cooldown_manager.get_state().user_message
-            current_project = self.project_manager.get_current_project(sender)
-            if not current_project:
-                return "No project selected. Use /select <project> first."
-            busy = self._check_task_busy(sender)
-            if busy:
-                return busy
-
-            await self._send_message(sender, "Analyzing project...")
-            self._start_background_task(
-                sender,
-                f"Answer this question about the codebase: {args}",
-                current_project
-            )
-            return None  # Response will be sent when task completes
-
-        elif command == "do":
-            if not args:
-                return "Usage: /do <task to perform>"
-            if self.cooldown_manager and self.cooldown_manager.is_active:
-                return self.cooldown_manager.get_state().user_message
-            current_project = self.project_manager.get_current_project(sender)
-            if not current_project:
-                return "No project selected. Use /select <project> first."
-            busy = self._check_task_busy(sender)
-            if busy:
-                return busy
-
-            await self._send_message(sender, "Working on it...")
-            self._start_background_task(sender, args, current_project)
-            return None  # Response will be sent when task completes
-
-        elif command == "complex":
-            if not args:
-                return "Usage: /complex <task>\nBreaks task into PRD with stories and autonomous tasks."
-            if self.cooldown_manager and self.cooldown_manager.is_active:
-                return self.cooldown_manager.get_state().user_message
-            if not self.project_manager.get_current_project(sender):
-                return "No project selected. Use /select <project> first."
-            busy = self._check_task_busy(sender)
-            if busy:
-                return busy
-
-            await self._send_message(sender, "Creating PRD and breaking into autonomous tasks...")
-            # Run PRD creation in background (non-blocking)
-            self._start_prd_creation_task(sender, args)
-            return None  # Response sent when PRD creation completes
-
-        elif command == "cancel":
-            return await self._cancel_current_task(sender)
-
-        elif command == "summary":
-            current_project = self.project_manager.get_current_project(sender)
-            if not current_project:
-                return "No project selected. Use /select <project> first."
-            busy = self._check_task_busy(sender)
-            if busy:
-                return busy
-
-            await self._send_message(sender, "Generating summary...")
-            self._start_background_task(
-                sender,
-                "Provide a comprehensive summary of this project including "
-                "its structure, main technologies used, and any recent changes "
-                "visible in git history.",
-                current_project
-            )
-            return None  # Response will be sent when task completes
-
-        # Memory commands - use current project by default
-        elif command == "remember":
-            return await self.memory_commands.handle_remember(
-                sender, args, project=self.project_manager.get_current_project(sender)
-            )
-
-        elif command == "recall":
-            return await self.memory_commands.handle_recall(
-                sender, args, project=self.project_manager.get_current_project(sender)
-            )
-
-        elif command == "history":
-            return await self.memory_commands.handle_history(
-                sender, args, project=self.project_manager.get_current_project(sender)
-            )
-
-        elif command == "forget":
-            return await self.memory_commands.handle_forget(sender, args)
-
-        elif command == "memories":
-            return await self.memory_commands.handle_memories(
-                sender, args, project=self.project_manager.get_current_project(sender)
-            )
-
-        elif command == "preferences":
-            return await self.memory_commands.handle_preferences(sender, args)
-
-        # Global memory commands - explicitly cross-project
-        elif command == "global":
-            return await self._handle_global_command(sender, args)
-
-        # Autonomous system commands
-        elif command == "prd":
-            return await self.autonomous_commands.handle_prd(sender, args)
-
-        elif command == "story":
-            return await self.autonomous_commands.handle_story(sender, args)
-
-        elif command == "task":
-            return await self.autonomous_commands.handle_task(sender, args)
-
-        elif command == "tasks":
-            return await self.autonomous_commands.handle_tasks(sender, args)
-
-        elif command == "autonomous":
-            return await self.autonomous_commands.handle_autonomous(sender, args)
-
-        elif command == "queue":
-            return await self.autonomous_commands.handle_queue(sender, args)
-
-        elif command == "learnings":
-            return await self.autonomous_commands.handle_learnings(sender, args)
-
-        elif command in ("nightwire", "sidechannel"):
-            if not self.nightwire_runner:
-                return "nightwire assistant is not enabled. Set nightwire_assistant.enabled: true in settings.yaml and provide OPENAI_API_KEY or GROK_API_KEY."
-            if not args:
-                return "Usage: /nightwire <question>\nAsk the AI assistant anything."
-            return await self._nightwire_response(args)
-
-        elif command == "update":
-            # Only admin (first allowed number) can trigger updates
-            if not self.config.allowed_numbers or sender != self.config.allowed_numbers[0]:
-                return "Only the admin can trigger updates."
-            if not self.updater:
-                return "Auto-update is not enabled. Set auto_update.enabled: true in settings.yaml."
-            return await self.updater.apply_update()
-
-        elif command == "cooldown":
-            return await self._handle_cooldown_command(sender, args)
-
-        else:
-            # Check plugin commands
-            plugin_handler = self.plugin_loader.get_all_commands().get(command)
-            if plugin_handler:
-                return await plugin_handler(sender, args)
-            return f"Unknown command: /{command}\nUse /help to see available commands."
-
-    async def _handle_cooldown_command(self, sender: str, args: str) -> str:
-        """Handle /cooldown [status|clear|test] command."""
-        if not self.cooldown_manager:
-            return "Cooldown manager not initialized."
-
-        subcommand = args.strip().lower() if args else "status"
-
-        if subcommand == "status":
-            state = self.cooldown_manager.get_state()
-            if state.active:
-                return f"Cooldown ACTIVE (~{state.remaining_minutes} min remaining)\n{state.user_message}"
-            return "No active cooldown. Claude operations are running normally."
-
-        elif subcommand == "clear":
-            if not self.cooldown_manager.is_active:
-                return "No active cooldown to clear."
-            self.cooldown_manager.deactivate()
-            return "Cooldown cleared. Claude operations resumed."
-
-        elif subcommand == "test":
-            if self.cooldown_manager.is_active:
-                return "Cooldown is already active. Use /cooldown clear first."
-            self.cooldown_manager.activate(cooldown_minutes=2)
-            return "Test cooldown activated (2 minutes). Use /cooldown clear to cancel."
-
-        else:
-            return "Usage: /cooldown [status|clear|test]"
-
-    def _get_help(self) -> str:
-        """Get help text."""
-        help_text = """nightwire Commands:
-
-Project Management:
-  /projects - List available projects
-  /select <project> - Select a project
-  /add <name> [path] [desc] - Add existing project
-  /remove <project> - Remove a project from the list
-  /new <name> [desc] - Create new project
-  /status - Show current project and task status
-  /summary - Generate project summary
-
-Claude Tasks:
-  /ask <question> - Ask about the current project
-  /do <task> - Execute a task with Claude
-  /complex <task> - Break into PRD with autonomous tasks
-  /cancel - Stop the running task
-
-Autonomous System:
-  /prd <title> - Create a Product Requirements Doc
-  /story <prd_id> <title> | <desc> - Add a user story
-  /task <story_id> <title> | <desc> - Add a task
-  /tasks [status] - List tasks
-  /queue story|prd <id> - Queue tasks for execution
-  /autonomous status|start|pause|stop - Control the loop
-  /learnings [search] - View or search learnings
-
-Memory:
-  /remember <text> - Store a memory
-  /recall <query> - Search past conversations
-  /memories - List stored memories
-  /history [count] - View recent messages
-  /forget all|preferences|today - Delete data
-  /preferences - View stored preferences
-  /global <cmd> - Cross-project memory commands"""
-
-        help_text += """
-
-System:
-  /cooldown [status|clear|test] - Rate limit cooldown info/control
-  /update - Apply a pending update (admin only)"""
-
-        if self.nightwire_runner:
-            help_text = """nightwire Commands:
-
-AI Assistant:
-  /nightwire <question> - Ask the AI assistant anything
-  Or just: nightwire <question>
-
-""" + help_text[len("nightwire Commands:\n\n"):]
-
-        # Append plugin help sections
-        for section in self.plugin_loader.get_all_help():
-            help_text += f"\n\n{section.title}:"
-            for cmd, desc in section.commands.items():
-                help_text += f"\n  /{cmd} - {desc}"
-
-        return help_text
-
-    async def _get_memory_context(self, sender: str, query: str,
-                                   project_name: Optional[str] = None) -> Optional[str]:
-        """Get memory context for a Claude prompt.
+    async def _handle_command(
+        self, command: str, args: str, sender: str
+    ) -> Optional[str]:
+        """Route a /command to the handler registry or plugins.
 
         Args:
-            sender: User's phone number
-            query: The current task/question
-            project_name: Project to scope memory to (uses sender's current if None)
+            command: Command name (without leading /).
+            args: Everything after the command name.
+            sender: Phone number or UUID of the sender.
 
         Returns:
-            Memory context string to inject, or None
+            Response string, or None if handled asynchronously.
         """
-        if project_name is None:
-            project_name = self.project_manager.get_current_project(sender)
-        try:
-            context = await self.memory.get_relevant_context(
-                phone_number=sender,
-                query=query,
-                project_name=project_name,
-                max_results=5,
-                max_tokens=self.config.memory_max_context_tokens
-            )
-            return context if context else None
-        except Exception as e:
-            logger.warning("memory_context_error", error=str(e))
-            return None
+        command = command.lower()
+        logger.debug("command_routing", command=command, has_args=bool(args))
 
-    def _start_background_task(self, sender: str, task_description: str, project_name: Optional[str]):
-        """Start a Claude task in the background (non-blocking).
+        # Check registered command handlers
+        handler = self._registry.get(command)
+        if handler:
+            return await handler(sender, args)
 
-        This allows other commands to be processed while the task runs.
-        Each sender can have one concurrent task.
-        """
-        task_state = {
-            "description": task_description,
-            "start": datetime.now(),
-            "step": "Preparing context...",
-            "task": None,  # Set after creation
-        }
-        self._sender_tasks[sender] = task_state
+        # Check plugin commands
+        plugin_handler = self.plugin_loader.get_all_commands().get(command)
+        if plugin_handler:
+            return await plugin_handler(sender, args)
 
-        async def run_task():
-            try:
-                async def progress_cb(msg: str):
-                    task_state["step"] = msg
-                    await self._send_message(sender, msg)
-
-                # Get memory context for this task (use project_name captured at creation)
-                task_state["step"] = "Loading memory context..."
-                memory_context = await self._get_memory_context(sender, task_description, project_name)
-
-                task_state["step"] = "Claude executing task..."
-                # Pass project_path directly to avoid shared-state race condition
-                task_project_path = self.project_manager.get_current_path(sender)
-                success, response = await self.runner.run_claude(
-                    task_description,
-                    progress_callback=progress_cb,
-                    memory_context=memory_context,
-                    project_path=task_project_path,
-                )
-
-                # Store response to memory
-                t = asyncio.create_task(
-                    self.memory.store_message(
-                        phone_number=sender,
-                        role="assistant",
-                        content=response,
-                        project_name=project_name,
-                        command_type="do"
-                    )
-                )
-                t.add_done_callback(_log_task_exception)
-
-                # Send the response
-                await self._send_message(sender, response)
-
-            except asyncio.CancelledError:
-                await self._send_message(sender, "Task cancelled.")
-                logger.info("background_task_cancelled", task=task_description[:50])
-            except Exception as e:
-                logger.error("background_task_error", error=str(e), exc_type=type(e).__name__)
-                await self._send_message(sender, "Task failed due to an internal error.")
-            finally:
-                # Clear task state for this sender
-                self._sender_tasks.pop(sender, None)
-
-        task_state["task"] = asyncio.create_task(run_task())
-        logger.info("background_task_started", task=task_description[:50], sender=sender)
-
-    async def _handle_global_command(self, sender: str, args: str) -> str:
-        """Handle /global <subcommand> for cross-project memory operations."""
-        if not args.strip():
-            return (
-                "Usage: /global <command> <args>\n\n"
-                "  remember <text> - Store a global memory\n"
-                "  recall <query> - Search all projects\n"
-                "  memories - List all memories\n"
-                "  history [count] - History across projects"
-            )
-
-        parts = args.strip().split(maxsplit=1)
-        subcommand = parts[0].lower()
-        subargs = parts[1] if len(parts) > 1 else ""
-
-        if subcommand == "remember":
-            return await self.memory_commands.handle_remember(sender, subargs, project=None)
-        elif subcommand == "recall":
-            return await self.memory_commands.handle_recall(sender, subargs, project=None)
-        elif subcommand == "memories":
-            return await self.memory_commands.handle_memories(sender, subargs, project=None)
-        elif subcommand == "history":
-            return await self.memory_commands.handle_history(sender, subargs, project=None)
-        else:
-            return f"Unknown global command: {subcommand}\n\nUse /global for help."
-
-    def _check_task_busy(self, sender: str) -> Optional[str]:
-        """Return a busy message if a task is running for this sender, else None."""
-        task_state = self._sender_tasks.get(sender)
-        if not task_state or not task_state.get("task") or task_state["task"].done():
-            return None
-        elapsed = ""
-        if task_state.get("start"):
-            mins = int((datetime.now() - task_state["start"]).total_seconds() / 60)
-            elapsed = f" ({mins}m)"
-        desc = task_state.get("description", "unknown")[:100]
-        return f"Task in progress{elapsed}: {desc}\nUse /cancel to stop it."
-
-    async def _cancel_current_task(self, sender: str) -> str:
-        """Cancel the currently running task for this sender."""
-        task_state = self._sender_tasks.get(sender)
-        if not task_state or not task_state.get("task") or task_state["task"].done():
-            return "No task is currently running."
-
-        task_desc = task_state.get("description", "unknown")
-        elapsed = ""
-        if task_state.get("start"):
-            mins = int((datetime.now() - task_state["start"]).total_seconds() / 60)
-            elapsed = f" after {mins}m"
-
-        task_state["task"].cancel()
-
-        # Also cancel any running Claude process
-        await self.runner.cancel()
-
-        logger.info("task_cancelled_by_user", task=task_desc[:50], sender=sender)
-        return f"Cancelled{elapsed}: {task_desc[:100]}"
-
-    def _start_prd_creation_task(self, sender: str, task_description: str):
-        """Start PRD creation in the background (non-blocking)."""
-        task_state = {
-            "description": f"Creating PRD: {task_description[:50]}...",
-            "start": datetime.now(),
-            "step": "Initializing...",
-            "task": None,  # Set after creation
-        }
-        self._sender_tasks[sender] = task_state
-
-        async def run_prd_creation():
-            try:
-                result = await self._create_autonomous_prd(sender, task_description)
-                await self._send_message(sender, result)
-            except asyncio.CancelledError:
-                await self._send_message(sender, "PRD creation cancelled.")
-                logger.info("prd_creation_cancelled")
-            except Exception as e:
-                logger.error("prd_creation_error", error=str(e), exc_type=type(e).__name__)
-                await self._send_message(sender, "PRD creation failed. Check logs for details.")
-            finally:
-                self._sender_tasks.pop(sender, None)
-
-        task_state["task"] = asyncio.create_task(run_prd_creation())
-        logger.info("prd_creation_started", task=task_description[:50], sender=sender)
-
-    async def _create_autonomous_prd(self, sender: str, task_description: str) -> str:
-        """Create a PRD with stories and tasks from a complex task description.
-
-        Uses Claude to intelligently break down the task into manageable pieces.
-        """
-        project_name = self.project_manager.get_current_project(sender)
-        project_path = self.project_manager.get_current_path(sender)
-
-        # Helper to update step and notify user
-        async def update_step(step: str, notify: bool = True):
-            task_state = self._sender_tasks.get(sender)
-            if task_state:
-                task_state["step"] = step
-            if notify:
-                await self._send_message(sender, step)
-
-        await update_step("Analyzing task complexity...")
-
-        # First, use Claude to analyze and break down the task
-        breakdown_prompt = f"""Analyze this task request and break it into a structured PRD (Product Requirements Document).
-
-TASK REQUEST:
-{task_description}
-
-PROJECT: {project_name}
-
-Return a JSON structure with this EXACT format (no markdown, just JSON):
-{{
-    "prd_title": "Brief title for the PRD (max 50 chars)",
-    "prd_description": "One paragraph summary of what we're building",
-    "stories": [
-        {{
-            "title": "Story title (max 50 chars)",
-            "description": "What this story accomplishes",
-            "tasks": [
-                {{
-                    "title": "Task title (max 50 chars)",
-                    "description": "Detailed description of what to do. Include specific files, functions, or components to modify. Be specific enough that Claude can execute this independently.",
-                    "priority": 10
-                }}
-            ]
-        }}
-    ]
-}}
-
-RULES:
-1. Break into logical stories (features/components)
-2. Each story should have 2-5 focused tasks
-3. Tasks should be atomic - completable in one Claude session
-4. Higher priority number = executed first
-5. Order tasks by dependency (foundations first)
-6. Include a final "Testing & Deployment" story if mentioned
-7. Be specific in task descriptions - mention exact files/components
-8. Keep tasks focused - if a task is too big, split it
-
-CRITICAL JSON FORMATTING:
-- Use double quotes for all strings
-- NO trailing commas
-- NO comments
-- Escape special characters in strings (use \\n for newlines)
-- Keep descriptions on single lines (no literal newlines in strings)
-
-Return ONLY valid JSON, no markdown code blocks, no explanation."""
-
-        try:
-            # Run Claude to get the breakdown (pass project_path directly to avoid race)
-            await update_step("Breaking down task...")
-            success, response = await self.runner.run_claude(
-                breakdown_prompt,
-                timeout=self.config.claude_timeout,
-                project_path=project_path,
-            )
-
-            if not success:
-                logger.error("prd_analyze_failed", response=response[:200])
-                return "Failed to analyze task."
-
-            await update_step("Parsing task breakdown...", notify=False)
-
-            # Parse the JSON response with robust error handling
-            breakdown = await parse_prd_json(response, self.runner, update_step)
-
-            await update_step("Creating PRD structure...", notify=False)
-
-            # Create the PRD
-            prd = await self.autonomous_manager.create_prd(
-                phone_number=sender,
-                project_name=project_name,
-                title=breakdown["prd_title"],
-                description=breakdown["prd_description"]
-            )
-
-            total_tasks = 0
-            story_summaries = []
-            total_stories = len(breakdown.get("stories", []))
-
-            # Create stories and tasks
-            for story_idx, story_data in enumerate(breakdown.get("stories", []), 1):
-                await update_step(f"Creating story {story_idx}/{total_stories}...", notify=False)
-                story = await self.autonomous_manager.create_story(
-                    prd_id=prd.id,
-                    phone_number=sender,
-                    title=story_data["title"],
-                    description=story_data["description"]
-                )
-
-                task_count = 0
-                for task_data in story_data.get("tasks", []):
-                    await self.autonomous_manager.create_task(
-                        story_id=story.id,
-                        phone_number=sender,
-                        project_name=project_name,
-                        title=task_data["title"],
-                        description=task_data["description"],
-                        priority=task_data.get("priority", 5)
-                    )
-                    task_count += 1
-                    total_tasks += 1
-
-                story_summaries.append(f"  - {story.title} ({task_count} tasks)")
-
-            await update_step("Queuing tasks for execution...")
-
-            # Queue all tasks
-            queued = await self.autonomous_manager.queue_prd(prd.id)
-
-            # Start the autonomous loop if not running
-            status = await self.autonomous_manager.get_loop_status()
-            if not status.is_running:
-                await self.autonomous_manager.start_loop()
-
-            # Return summary
-            loop_state = "Started" if not status.is_running else "Running"
-            return (
-                f"PRD #{prd.id}: {prd.title}\n\n"
-                f"Stories:\n" + "\n".join(story_summaries) + "\n\n"
-                f"{total_tasks} tasks queued | Loop: {loop_state}\n"
-                f"Use /tasks or /autonomous status to monitor."
-            )
-
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error("prd_json_parse_error", error=str(e), exc_type=type(e).__name__)
-            return "Failed to parse the task breakdown. Please try again."
-        except KeyError as e:
-            logger.error("prd_missing_field", error=str(e))
-            return "Task breakdown was incomplete. Please try again."
-        except Exception as e:
-            logger.error("prd_creation_error", error=str(e), exc_type=type(e).__name__)
-            return "PRD creation failed. Please try again or check logs."
+        return f"Unknown command: /{command}\nUse /help to see available commands."
 
     async def _process_message(self, sender: str, message: str):
-        """Process an incoming message."""
-        # Check authorization
+        """Process an incoming message through the full routing chain.
+
+        Routing order: /commands -> plugin matchers -> nightwire
+        assistant -> default Claude handler. Stores both user and
+        assistant messages to memory.
+
+        Args:
+            sender: Phone number or UUID of the sender.
+            message: Raw message text.
+        """
         if not is_authorized(sender):
             logger.warning("unauthorized_message", sender="..." + sender[-4:])
-            return  # Silently ignore unauthorized messages
-
-        # Check rate limit
-        if not check_rate_limit(sender):
-            logger.warning("rate_limited", sender="..." + sender[-4:])
-            await self._send_message(sender, "Rate limited. Please wait before sending more messages.")
             return
 
-        # Sanitize input
-        message = sanitize_input(message.strip())
+        if not check_rate_limit(sender):
+            logger.warning("rate_limited", sender="..." + sender[-4:])
+            await self._send_message(
+                sender, "Rate limited. Please wait before sending more messages."
+            )
+            return
 
+        message = sanitize_input(message.strip())
         if not message:
             return
 
         logger.info(
             "message_received",
             sender="..." + sender[-4:],
-            length=len(message)
+            length=len(message),
         )
 
-        # Determine command type for memory logging
         command_type = None
         if message.startswith("/"):
             parts = message[1:].split(maxsplit=1)
             command_type = parts[0].lower()
 
-        # Store incoming message (fire and forget, don't block)
         project_name = self.project_manager.get_current_project(sender)
         t = asyncio.create_task(
             self.memory.store_message(
@@ -983,93 +434,71 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 role="user",
                 content=message,
                 project_name=project_name,
-                command_type=command_type
+                command_type=command_type,
             )
         )
-        t.add_done_callback(_log_task_exception)
+        t.add_done_callback(log_task_exception)
 
-        # Check if it's a command
+        # Route the message
         if message.startswith("/"):
             parts = message[1:].split(maxsplit=1)
             command = parts[0]
             args = parts[1] if len(parts) > 1 else ""
 
+            logger.debug("message_routing", is_command=True, routing_path="command")
             response = await self._handle_command(command, args, sender)
         else:
-            # Check plugin message matchers
             response = None
             for matcher in self.plugin_loader.get_sorted_matchers():
-                if matcher.match_fn(message):
+                matched = matcher.match_fn(message)
+                logger.debug(
+                    "plugin_matcher_evaluated",
+                    matcher=type(matcher).__name__, matched=matched,
+                )
+                if matched:
                     response = await matcher.handle_fn(sender, message)
                     break
 
-            if response is None and self._is_nightwire_query(message):
-                # Addressed to nightwire - general AI assistant mode
-                response = await self._nightwire_response(message)
-            elif response is None:
-                # Treat non-command messages as /do commands if a project is selected
+            if response is None and self._core_handler._is_nightwire_query(message):
+                logger.debug("message_routing", is_command=False, routing_path="nightwire")
+                response = await self._core_handler._nightwire_response(message)
+            elif response is not None:
+                logger.debug("message_routing", is_command=False, routing_path="matcher")
+            else:
+                logger.debug("message_routing", is_command=False, routing_path="default")
                 if self.cooldown_manager and self.cooldown_manager.is_active:
                     response = self.cooldown_manager.get_state().user_message
                 elif project_name:
-                    busy = self._check_task_busy(sender)
+                    busy = self.task_manager.check_busy(sender)
                     if busy:
                         response = busy
                     else:
                         await self._send_message(sender, "Working on it...")
-                        self._start_background_task(sender, message, project_name)
-                        return  # Response will be sent when task completes
+                        self.task_manager.start_background_task(
+                            sender, message, project_name
+                        )
+                        return
                 else:
-                    response = "No project selected. Use /projects to list or /select <project> to choose one."
+                    response = (
+                        "No project selected. Use /projects to list"
+                        " or /select <project> to choose one."
+                    )
 
-
-        # If response is None, the task is running in background
         if response is None:
             return
 
-        # Store outgoing response (fire and forget)
         t = asyncio.create_task(
             self.memory.store_message(
                 phone_number=sender,
                 role="assistant",
                 content=response,
                 project_name=project_name,
-                command_type=command_type
+                command_type=command_type,
             )
         )
-        t.add_done_callback(_log_task_exception)
+        t.add_done_callback(log_task_exception)
 
         await self._send_message(sender, response)
-
-    def _is_nightwire_query(self, message: str) -> bool:
-        """Detect if a message is addressed to nightwire assistant."""
-        if not self.nightwire_runner:
-            return False
-        msg_lower = message.lower().strip()
-        # Match: "nightwire:" / "sidechannel:" variants, followed by text, or just the name
-        for prefix in ("nightwire:", "nightwire,", "sidechannel:", "sidechannel,"):
-            if msg_lower.startswith(prefix):
-                return True
-        for prefix in ("nightwire ", "sidechannel "):
-            if msg_lower.startswith(prefix) and len(msg_lower) > len(prefix):
-                return True
-        if msg_lower in ("nightwire", "sidechannel"):
-            return True
-        return False
-
-    async def _nightwire_response(self, message: str) -> str:
-        """Generate a nightwire response using the configured provider."""
-        if not self.nightwire_runner:
-            return "nightwire assistant is not enabled. Set nightwire_assistant.enabled: true in settings.yaml and provide OPENAI_API_KEY or GROK_API_KEY."
-        try:
-            logger.info("nightwire_query", length=len(message))
-            success, response = await self.nightwire_runner.ask_jarvis(message)
-            if not response or not response.strip():
-                logger.warning("nightwire_empty_response")
-                return "The assistant returned an empty response. Please try again."
-            return response
-        except Exception as e:
-            logger.error("nightwire_response_error", error=str(e), exc_type=type(e).__name__)
-            return "The assistant encountered an error. Please try again later."
 
     async def poll_messages(self):
         """Connect via WebSocket to receive messages (json-rpc mode)."""
@@ -1077,8 +506,9 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
             logger.error("no_account_for_polling")
             return
 
-        # Convert http:// to ws:// for websocket connection
-        ws_base = self.config.signal_api_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_base = self.config.signal_api_url.replace(
+            "http://", "ws://"
+        ).replace("https://", "wss://")
         ws_url = f"{ws_base}/v1/receive/{self.account}"
 
         reconnect_delay = 5
@@ -1089,7 +519,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 logger.info("websocket_connecting", url=ws_url)
                 async with self.session.ws_connect(ws_url, heartbeat=30) as ws:
                     logger.info("websocket_connected")
-                    reconnect_delay = 5  # Reset on successful connection
+                    reconnect_delay = 5
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             try:
@@ -1115,64 +545,69 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
         """Handle a message from Signal API."""
         try:
             envelope = msg.get("envelope", {})
-            source = envelope.get("source") or envelope.get("sourceNumber") or envelope.get("sourceUuid")
+            source = (
+                envelope.get("source")
+                or envelope.get("sourceNumber")
+                or envelope.get("sourceUuid")
+            )
             message_text = None
 
-            # Check for regular data message (from others TO us)
             data_message = envelope.get("dataMessage")
             if data_message:
                 message_text = data_message.get("message", "")
 
-            # Check for sync message (our own messages sent from another device)
             sync_message = envelope.get("syncMessage")
             if sync_message and not message_text:
                 sent_message = sync_message.get("sentMessage")
                 if sent_message:
-                    # Check destination - only process messages sent to our own number
-                    destination = sent_message.get("destination") or sent_message.get("destinationNumber")
-
-                    # Ignore group messages
+                    destination = (
+                        sent_message.get("destination")
+                        or sent_message.get("destinationNumber")
+                    )
                     if sent_message.get("groupInfo"):
                         return
-
-                    # Only process if sent to ourselves (the bot's number)
                     if destination and destination == self.account:
                         message_text = sent_message.get("message", "")
                         source = self.account
 
-            # Ignore receipts, typing indicators, and other message types
             if not message_text or not message_text.strip():
                 return
-
-            # SECURITY: Only process messages from authorized sources
             if not source:
                 return
 
-            # Deduplication: Signal sends both dataMessage and syncMessage for self-messages
+            # Deduplication
             timestamp = envelope.get("timestamp", 0)
-            msg_hash = hashlib.sha256(f"{timestamp}:{message_text.strip()}".encode()).hexdigest()
+            msg_hash = hashlib.sha256(
+                f"{timestamp}:{message_text.strip()}".encode()
+            ).hexdigest()
             if msg_hash in self._processed_messages:
                 logger.debug("duplicate_message_skipped", timestamp=timestamp)
                 return
             self._processed_messages[msg_hash] = _time.time()
 
-            # Evict entries older than 60 seconds
             cutoff = _time.time() - 60
             while self._processed_messages:
-                oldest_key, oldest_time = next(iter(self._processed_messages.items()))
+                oldest_key, oldest_time = next(
+                    iter(self._processed_messages.items())
+                )
                 if oldest_time < cutoff:
                     self._processed_messages.pop(oldest_key)
                 else:
                     break
 
-            logger.info("processing_message", source="..." + source[-4:], length=len(message_text))
+            logger.info(
+                "processing_message",
+                source="..." + source[-4:], length=len(message_text),
+            )
             await self._process_message(source, message_text)
 
         except Exception as e:
-            logger.error("message_handling_error", error=str(e), msg=str(msg)[:200])
+            logger.error(
+                "message_handling_error", error=str(e), msg=str(msg)[:200]
+            )
 
     async def run(self):
-        """Main run loop."""
+        """Main run loop: start, poll messages, stop on exit."""
         await self.start()
 
         try:

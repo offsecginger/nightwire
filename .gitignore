@@ -4,6 +4,10 @@ config/projects.yaml
 config/.env
 *.env
 
+# Cursor
+.cursorignore
+.cursorindexingignore
+
 # Data
 data/
 *.db
@@ -19,9 +23,6 @@ __pycache__/
 *$py.class
 *.so
 .Python
-venv/
-ENV/
-.venv/
 *.egg-info/
 *.egg
 *.whl
@@ -54,6 +55,7 @@ docs/plans/
 
 # Claude Code config (contains personal info)
 CLAUDE.md
+.claude/*
 
 # Private plugins
 plugins/daily_verse/
@@ -62,3 +64,14 @@ plugins/bluos_music/
 # Signal data
 signal-data/
 signal-cli-config/
+
+# Environments
+.vscode/
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/

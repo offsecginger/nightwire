@@ -1,0 +1,451 @@
+"""Background task lifecycle management for Nightwire bot.
+
+Manages per-sender background tasks: starting Claude tasks, checking busy
+state, cancelling tasks, and PRD creation orchestration.
+"""
+
+import asyncio
+import json
+from datetime import datetime
+from typing import Awaitable, Callable, Dict, Optional
+
+import structlog
+
+from .prd_builder import parse_prd_json
+
+logger = structlog.get_logger("nightwire.bot")
+
+
+def log_task_exception(task: asyncio.Task):
+    """Log exceptions from fire-and-forget tasks instead of silently swallowing them."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.error("background_task_failed", error=str(exc), exc_type=type(exc).__name__)
+
+
+class TaskManager:
+    """Manages per-sender background task lifecycle.
+
+    Each sender can have one concurrent background task. Handles task
+    creation, progress tracking, cancellation, and PRD creation.
+    """
+
+    def __init__(
+        self,
+        runner,
+        project_manager,
+        memory,
+        config,
+        send_message: Callable[[str, str], Awaitable[None]],
+        get_memory_context: Callable[..., Awaitable[Optional[str]]],
+    ):
+        """Initialize the task manager.
+
+        Args:
+            runner: ClaudeRunner instance for executing tasks.
+            project_manager: ProjectManager for path resolution.
+            memory: MemoryManager for context and storage.
+            config: Config instance for timeouts and settings.
+            send_message: Async callback to send Signal messages.
+            get_memory_context: Async callback to build memory
+                context for a sender/prompt/project triple.
+        """
+        self.runner = runner
+        self.project_manager = project_manager
+        self.memory = memory
+        self.config = config
+        self._send_message = send_message
+        self._get_memory_context = get_memory_context
+        self._sender_tasks: Dict[str, dict] = {}
+        # Set after start() — deferred initialization
+        self.autonomous_manager = None
+
+    def get_task_state(self, sender: str) -> Optional[dict]:
+        """Get the current task state for a sender, or None."""
+        return self._sender_tasks.get(sender)
+
+    def check_busy(self, sender: str) -> Optional[str]:
+        """Return a busy message if a task is running for this sender, else None."""
+        task_state = self._sender_tasks.get(sender)
+        if not task_state or not task_state.get("task") or task_state["task"].done():
+            return None
+        elapsed = ""
+        if task_state.get("start"):
+            mins = int((datetime.now() - task_state["start"]).total_seconds() / 60)
+            elapsed = f" ({mins}m)"
+        desc = task_state.get("description", "unknown")[:100]
+        return f"Task in progress{elapsed}: {desc}\nUse /cancel to stop it."
+
+    def start_background_task(
+        self, sender: str, task_description: str, project_name: Optional[str]
+    ) -> None:
+        """Start a Claude task in the background (non-blocking).
+
+        Args:
+            sender: Phone number of the requesting user.
+            task_description: The user's prompt/task text.
+            project_name: Currently selected project name.
+        """
+        task_state = {
+            "description": task_description,
+            "start": datetime.now(),
+            "step": "Preparing context...",
+            "task": None,
+        }
+        self._sender_tasks[sender] = task_state
+
+        async def run_task():
+            try:
+                async def progress_cb(msg: str):
+                    task_state["step"] = msg
+                    await self._send_message(sender, msg)
+
+                task_state["step"] = "Loading memory context..."
+                memory_context = await self._get_memory_context(
+                    sender, task_description, project_name
+                )
+
+                task_state["step"] = "Claude executing task..."
+                task_project_path = self.project_manager.get_current_path(sender)
+                success, response = await self.runner.run_claude(
+                    task_description,
+                    progress_callback=progress_cb,
+                    memory_context=memory_context,
+                    project_path=task_project_path,
+                    stream=True,
+                )
+
+                # Store response to memory (fire-and-forget)
+                t = asyncio.create_task(
+                    self.memory.store_message(
+                        phone_number=sender,
+                        role="assistant",
+                        content=response,
+                        project_name=project_name,
+                        command_type="do",
+                    )
+                )
+                t.add_done_callback(log_task_exception)
+
+                if success:
+                    await self._send_message(sender, "[Task complete]")
+                else:
+                    await self._send_message(sender, response)
+
+            except asyncio.CancelledError:
+                await self._send_message(sender, "Task cancelled.")
+                logger.info("background_task_cancelled", task=task_description[:50])
+            except Exception as e:
+                logger.error(
+                    "background_task_error", error=str(e), exc_type=type(e).__name__
+                )
+                await self._send_message(sender, "Task failed due to an internal error.")
+            finally:
+                self._sender_tasks.pop(sender, None)
+
+        task_state["task"] = asyncio.create_task(run_task())
+        logger.info("background_task_started", task=task_description[:50], sender=sender)
+
+    async def cancel_current_task(self, sender: str) -> str:
+        """Cancel the currently running task for this sender.
+
+        Args:
+            sender: Phone number of the requesting user.
+
+        Returns:
+            User-facing status message.
+        """
+        task_state = self._sender_tasks.get(sender)
+        if not task_state or not task_state.get("task") or task_state["task"].done():
+            return "No task is currently running."
+
+        task_desc = task_state.get("description", "unknown")
+        elapsed = ""
+        if task_state.get("start"):
+            mins = int(
+                (datetime.now() - task_state["start"]).total_seconds() / 60
+            )
+            elapsed = f" after {mins}m"
+
+        task_state["task"].cancel()
+        await self.runner.cancel()
+
+        logger.info("task_cancelled_by_user", task=task_desc[:50], sender=sender)
+        return f"Cancelled{elapsed}: {task_desc[:100]}"
+
+    def start_prd_creation_task(self, sender: str, task_description: str) -> None:
+        """Start PRD creation in the background (non-blocking)."""
+        task_state = {
+            "description": f"Creating PRD: {task_description[:50]}...",
+            "start": datetime.now(),
+            "step": "Initializing...",
+            "task": None,
+        }
+        self._sender_tasks[sender] = task_state
+
+        async def run_prd_creation():
+            try:
+                result = await self.create_autonomous_prd(sender, task_description)
+                await self._send_message(sender, result)
+            except asyncio.CancelledError:
+                await self._send_message(sender, "PRD creation cancelled.")
+                logger.info("prd_creation_cancelled")
+            except Exception as e:
+                logger.error(
+                    "prd_creation_error", error=str(e), exc_type=type(e).__name__
+                )
+                await self._send_message(
+                    sender, "PRD creation failed. Check logs for details."
+                )
+            finally:
+                self._sender_tasks.pop(sender, None)
+
+        task_state["task"] = asyncio.create_task(run_prd_creation())
+        logger.info("prd_creation_started", task=task_description[:50], sender=sender)
+
+    async def create_autonomous_prd(
+        self, sender: str, task_description: str
+    ) -> str:
+        """Create a PRD with stories and tasks via Claude.
+
+        Tries structured SDK output first (PRDBreakdown model),
+        falls back to text mode + parse_prd_json on failure.
+
+        Args:
+            sender: Phone number of the requesting user.
+            task_description: High-level feature description.
+
+        Returns:
+            User-facing summary of the created PRD.
+
+        Raises:
+            json.JSONDecodeError: If JSON parsing fails.
+            ValueError: If breakdown is incomplete.
+        """
+        project_name = self.project_manager.get_current_project(sender)
+        project_path = self.project_manager.get_current_path(sender)
+
+        async def update_step(step: str, notify: bool = True):
+            task_state = self._sender_tasks.get(sender)
+            if task_state:
+                task_state["step"] = step
+            if notify:
+                await self._send_message(sender, step)
+
+        await update_step("Analyzing task complexity...")
+
+        from .autonomous.models import PRDBreakdown
+
+        # Prompt describes WHAT to generate; API json_schema enforces HOW
+        structured_prompt = f"""Analyze this task request and break it \
+into a structured PRD (Product Requirements Document).
+
+TASK REQUEST:
+{task_description}
+
+PROJECT: {project_name}
+
+RULES:
+1. Break into logical stories (features/components)
+2. Each story should have 2-5 focused tasks
+3. Tasks should be atomic - completable in one Claude session
+4. Higher priority number = executed first
+5. Order tasks by dependency (foundations first)
+6. Include a final "Testing & Deployment" story if mentioned
+7. Be specific in task descriptions - mention exact files/components
+8. Keep tasks focused - if a task is too big, split it"""
+
+        # Fallback prompt with explicit JSON format (used when structured fails)
+        fallback_prompt = structured_prompt + """
+
+Return a JSON structure with this EXACT format (no markdown, just JSON):
+{
+    "prd_title": "Brief title for the PRD",
+    "prd_description": "One paragraph summary",
+    "stories": [
+        {
+            "title": "Story title",
+            "description": "What this story accomplishes",
+            "tasks": [
+                {
+                    "title": "Task title",
+                    "description": "Detailed task description",
+                    "priority": 10
+                }
+            ]
+        }
+    ]
+}
+
+Return ONLY valid JSON, no markdown code blocks, no explanation."""
+
+        try:
+            # Primary: structured output via SDK
+            await update_step("Breaking down task (structured)...")
+            success, result = await self.runner.run_claude_structured(
+                structured_prompt,
+                response_model=PRDBreakdown,
+                timeout=self.config.claude_timeout,
+                project_path=project_path,
+            )
+
+            if success and isinstance(result, PRDBreakdown):
+                # Structured path — typed model access
+                await update_step("Creating PRD structure...", notify=False)
+                return await self._create_prd_from_breakdown(
+                    sender, project_name, result, update_step,
+                )
+
+            # Fallback: text mode + parse_prd_json
+            logger.info("prd_structured_fallback", reason=str(result)[:200])
+            await update_step("Retrying with text mode...")
+            success, response = await self.runner.run_claude(
+                fallback_prompt,
+                timeout=self.config.claude_timeout,
+                project_path=project_path,
+            )
+
+            if not success:
+                logger.error("prd_analyze_failed", response=response[:200])
+                return "Failed to analyze task."
+
+            await update_step("Parsing task breakdown...", notify=False)
+            breakdown = await parse_prd_json(
+                response, self.runner, update_step,
+            )
+
+            await update_step("Creating PRD structure...", notify=False)
+            return await self._create_prd_from_dict(
+                sender, project_name, breakdown, update_step,
+            )
+
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(
+                "prd_json_parse_error", error=str(e), exc_type=type(e).__name__
+            )
+            return "Failed to parse the task breakdown. Please try again."
+        except KeyError as e:
+            logger.error("prd_missing_field", error=str(e))
+            return "Task breakdown was incomplete. Please try again."
+        except Exception as e:
+            logger.error(
+                "prd_creation_error", error=str(e), exc_type=type(e).__name__
+            )
+            return "PRD creation failed. Please try again or check logs."
+
+    async def _create_prd_from_breakdown(
+        self, sender, project_name, breakdown, update_step,
+    ) -> str:
+        """Create PRD/stories/tasks from a typed PRDBreakdown model."""
+        prd = await self.autonomous_manager.create_prd(
+            phone_number=sender,
+            project_name=project_name,
+            title=breakdown.prd_title,
+            description=breakdown.prd_description,
+        )
+
+        total_tasks = 0
+        story_summaries = []
+
+        for story_idx, story_bd in enumerate(breakdown.stories, 1):
+            await update_step(
+                f"Creating story {story_idx}/{len(breakdown.stories)}...",
+                notify=False,
+            )
+            story = await self.autonomous_manager.create_story(
+                prd_id=prd.id,
+                phone_number=sender,
+                title=story_bd.title,
+                description=story_bd.description,
+            )
+
+            for task_bd in story_bd.tasks:
+                await self.autonomous_manager.create_task(
+                    story_id=story.id,
+                    phone_number=sender,
+                    project_name=project_name,
+                    title=task_bd.title,
+                    description=task_bd.description,
+                    priority=task_bd.priority,
+                )
+                total_tasks += 1
+
+            story_summaries.append(
+                f"  - {story.title} ({len(story_bd.tasks)} tasks)"
+            )
+
+        return await self._finalize_prd(
+            prd, total_tasks, story_summaries, update_step,
+        )
+
+    async def _create_prd_from_dict(
+        self, sender, project_name, breakdown, update_step,
+    ) -> str:
+        """Create PRD/stories/tasks from a parsed dict (fallback path)."""
+        prd = await self.autonomous_manager.create_prd(
+            phone_number=sender,
+            project_name=project_name,
+            title=breakdown["prd_title"],
+            description=breakdown["prd_description"],
+        )
+
+        total_tasks = 0
+        story_summaries = []
+        total_stories = len(breakdown.get("stories", []))
+
+        for story_idx, story_data in enumerate(
+            breakdown.get("stories", []), 1,
+        ):
+            await update_step(
+                f"Creating story {story_idx}/{total_stories}...",
+                notify=False,
+            )
+            story = await self.autonomous_manager.create_story(
+                prd_id=prd.id,
+                phone_number=sender,
+                title=story_data["title"],
+                description=story_data["description"],
+            )
+
+            task_count = 0
+            for task_data in story_data.get("tasks", []):
+                await self.autonomous_manager.create_task(
+                    story_id=story.id,
+                    phone_number=sender,
+                    project_name=project_name,
+                    title=task_data["title"],
+                    description=task_data["description"],
+                    priority=task_data.get("priority", 5),
+                )
+                task_count += 1
+                total_tasks += 1
+
+            story_summaries.append(
+                f"  - {story.title} ({task_count} tasks)"
+            )
+
+        return await self._finalize_prd(
+            prd, total_tasks, story_summaries, update_step,
+        )
+
+    async def _finalize_prd(
+        self, prd, total_tasks, story_summaries, update_step,
+    ) -> str:
+        """Queue tasks and return summary (shared by both paths)."""
+        await update_step("Queuing tasks for execution...")
+
+        await self.autonomous_manager.queue_prd(prd.id)
+
+        status = await self.autonomous_manager.get_loop_status()
+        if not status.is_running:
+            await self.autonomous_manager.start_loop()
+
+        loop_state = "Started" if not status.is_running else "Running"
+        return (
+            f"PRD #{prd.id}: {prd.title}\n\n"
+            f"Stories:\n" + "\n".join(story_summaries) + "\n\n"
+            f"{total_tasks} tasks queued | Loop: {loop_state}\n"
+            f"Use /tasks or /autonomous status to monitor."
+        )

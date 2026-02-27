@@ -1,9 +1,10 @@
 """Tests for security module."""
 
 import asyncio
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+
+import pytest
 
 from nightwire.security import require_valid_project_path, validate_project_path
 
@@ -60,7 +61,7 @@ def test_claude_runner_set_project_validates_path():
 @pytest.mark.asyncio
 async def test_rate_limiter_thread_safety():
     """Rate limiter should be safe under concurrent access."""
-    from nightwire.security import check_rate_limit_async, _reset_rate_limits
+    from nightwire.security import _reset_rate_limits, check_rate_limit_async
 
     _reset_rate_limits()
 

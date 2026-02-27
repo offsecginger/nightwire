@@ -3,29 +3,29 @@
 Provides episodic memory with vector search for context-aware conversations.
 """
 
-from .models import (
-    User,
-    Session,
-    Conversation,
-    Preference,
-    ExplicitMemory,
-    SearchResult,
-    MemoryContext,
-)
-from .manager import (
-    MemoryManager,
-    get_memory_manager,
-    initialize_memory_manager,
-)
+from .commands import MemoryCommands
+from .context_builder import ContextBuilder
 from .database import (
     DatabaseConnection,
     get_database,
     initialize_database,
 )
-from .commands import MemoryCommands
 from .embeddings import EmbeddingService, get_embedding_service
-from .context_builder import ContextBuilder
 from .haiku_summarizer import HaikuSummarizer, get_haiku_summarizer
+from .manager import (
+    MemoryManager,
+    get_memory_manager,
+    initialize_memory_manager,
+)
+from .models import (
+    Conversation,
+    ExplicitMemory,
+    MemoryContext,
+    Preference,
+    SearchResult,
+    Session,
+    User,
+)
 
 __all__ = [
     # Models

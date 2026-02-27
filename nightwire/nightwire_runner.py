@@ -1,13 +1,43 @@
-"""nightwire AI assistant runner for any OpenAI-compatible provider."""
+"""Nightwire AI assistant runner for any OpenAI-compatible provider.
+
+Provides a lightweight alternative to Claude for quick questions.
+Supports any provider with an OpenAI-compatible chat completions
+endpoint (OpenAI, Grok/xAI, local models, etc.). Includes both
+plain-text and structured JSON output modes.
+
+Key classes:
+    AssistantResponse: Pydantic model wrapping a provider response.
+    NightwireRunner: Manages API calls, session lifecycle, and
+        response parsing for the configured provider.
+
+Key functions:
+    get_nightwire_runner: Singleton accessor for global instance.
+"""
 
 import asyncio
-from typing import Optional, Tuple
+import json
+from typing import Optional, Tuple, Type, TypeVar, Union
 from urllib.parse import urlparse
 
 import aiohttp
 import structlog
+from pydantic import BaseModel
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.claude")
+
+T = TypeVar("T", bound=BaseModel)
+
+
+class AssistantResponse(BaseModel):
+    """Structured response from the nightwire assistant.
+
+    Wraps the raw OpenAI-compatible API response with typed fields.
+    """
+
+    content: str
+    tokens_used: Optional[int] = None
+    model: str
+
 
 class NightwireRunner:
     """Manages API execution for nightwire AI assistant.
@@ -16,6 +46,33 @@ class NightwireRunner:
     OpenAI and Grok are available as built-in convenience presets.
     """
 
+    SYSTEM_PROMPT = (
+        "You are nightwire, an intelligent AI development assistant "
+        "integrated into a Signal messaging bot.\n\n"
+        "Personality:\n"
+        "- Professional yet friendly\n"
+        "- Concise and helpful\n"
+        "- Technical but approachable\n"
+        "- Direct and efficient\n\n"
+        "Capabilities:\n"
+        "- Answer questions on any topic\n"
+        "- Provide technical guidance and recommendations\n"
+        "- Help with research and analysis\n"
+        "- Give coding advice and best practices\n\n"
+        "When responding:\n"
+        "- Be concise (responses go through Signal messages)\n"
+        "- Lead with the answer, then provide context if needed\n"
+        "- For coding/development tasks, remind the user that /select, "
+        "/ask, and /do commands are available for hands-on Claude "
+        "integration\n"
+        "- Be helpful and informative without being verbose\n\n"
+        "Response Style:\n"
+        "- Clear and organized\n"
+        "- Use bullet points for lists\n"
+        "- Keep responses under 4000 characters\n"
+        "- No emojis unless specifically requested"
+    )
+
     def __init__(
         self,
         api_url: str,
@@ -23,6 +80,18 @@ class NightwireRunner:
         model: str,
         max_tokens: int = 1024,
     ):
+        """Initialize the runner with provider credentials.
+
+        Args:
+            api_url: Full URL to the chat completions endpoint.
+                Must use HTTPS.
+            api_key: Bearer token for the provider API.
+            model: Model identifier (e.g. "gpt-4o", "grok-3").
+            max_tokens: Max tokens per response (default 1024).
+
+        Raises:
+            ValueError: If api_url is not HTTPS or has no host.
+        """
         self.api_url = api_url
         self.api_key = api_key
         self.model = model
@@ -54,29 +123,16 @@ class NightwireRunner:
             await self._session.close()
             self._session = None
 
-    async def ask_jarvis(
-        self,
-        message: str,
-        timeout: int = 60,
-    ) -> Tuple[bool, str]:
-        """
-        Send a query to the configured provider as nightwire AI assistant.
-
-        Args:
-            message: The user's message
-            timeout: Request timeout in seconds
-
-        Returns:
-            Tuple of (success, response)
-        """
-        if not self.api_key:
-            return False, "nightwire assistant is not configured. Set the API key for your provider in .env (see api_key_env in settings.yaml)."
-
-        # Clean the message - remove nightwire/sidechannel prefix variations
+    def _clean_message(self, message: str) -> str:
+        """Strip nightwire/sidechannel prefix variations from user message."""
         clean_message = message.strip()
         msg_lower = clean_message.lower()
-        for variant in ["nightwire:", "nightwire,", "nightwire ", "hey nightwire ", "hi nightwire ", "ok nightwire ",
-                         "sidechannel:", "sidechannel,", "sidechannel ", "hey sidechannel ", "hi sidechannel ", "ok sidechannel "]:
+        for variant in [
+            "nightwire:", "nightwire,", "nightwire ",
+            "hey nightwire ", "hi nightwire ", "ok nightwire ",
+            "sidechannel:", "sidechannel,", "sidechannel ",
+            "hey sidechannel ", "hi sidechannel ", "ok sidechannel ",
+        ]:
             if msg_lower.startswith(variant):
                 clean_message = clean_message[len(variant):].strip()
                 break
@@ -84,88 +140,242 @@ class NightwireRunner:
         if clean_message.lower() in ("nightwire", "sidechannel") or not clean_message:
             clean_message = "Hello, how can you help me?"
 
-        system_prompt = """You are nightwire, an intelligent AI development assistant integrated into a Signal messaging bot.
+        return clean_message
 
-Personality:
-- Professional yet friendly
-- Concise and helpful
-- Technical but approachable
-- Direct and efficient
+    def _build_headers(self) -> dict:
+        """Build HTTP headers for the API request."""
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
 
-Capabilities:
-- Answer questions on any topic
-- Provide technical guidance and recommendations
-- Help with research and analysis
-- Give coding advice and best practices
-
-When responding:
-- Be concise (responses go through Signal messages)
-- Lead with the answer, then provide context if needed
-- For coding/development tasks, remind the user that /select, /ask, and /do commands are available for hands-on Claude integration
-- Be helpful and informative without being verbose
-
-Response Style:
-- Clear and organized
-- Use bullet points for lists
-- Keep responses under 4000 characters
-- No emojis unless specifically requested"""
-
+    def _build_payload(
+        self,
+        clean_message: str,
+        response_format: Optional[dict] = None,
+    ) -> dict:
+        """Build the OpenAI-compatible API payload."""
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": clean_message}
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": clean_message},
             ],
             "temperature": 0.7,
             "max_tokens": self.max_tokens,
         }
+        if response_format:
+            payload["response_format"] = response_format
+        return payload
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+    def _parse_response(self, data: dict) -> Optional[AssistantResponse]:
+        """Parse an OpenAI-compatible API response into AssistantResponse.
+
+        Returns None if the response is malformed or has no content.
+        """
+        choices = data.get("choices")
+        if not choices or not isinstance(choices, list):
+            logger.error("nightwire_malformed_response", data_keys=list(data.keys()))
+            return None
+
+        content = choices[0].get("message", {}).get("content", "")
+        if not content:
+            logger.warning("nightwire_empty_response")
+            return None
+
+        usage = data.get("usage", {})
+        tokens_used = usage.get("total_tokens") if usage else None
+        model = data.get("model", self.model)
+
+        return AssistantResponse(
+            content=content,
+            tokens_used=tokens_used,
+            model=model,
+        )
+
+    async def _make_request(
+        self,
+        payload: dict,
+        timeout: int,
+    ) -> Tuple[bool, Union[AssistantResponse, str]]:
+        """Execute an API request and parse the response.
+
+        Returns:
+            Tuple of (success, AssistantResponse | error_string).
+        """
+        if not self.api_key:
+            return False, (
+                "nightwire assistant is not configured. "
+                "Set the API key for your provider in .env "
+                "(see api_key_env in settings.yaml)."
+            )
 
         try:
             session = await self._get_session()
             async with session.post(
                 self.api_url,
                 json=payload,
-                headers=headers,
+                headers=self._build_headers(),
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    choices = data.get("choices")
-                    if not choices or not isinstance(choices, list):
-                        logger.error("nightwire_malformed_response", data_keys=list(data.keys()))
-                        return False, "Received an unexpected response from the AI provider. Please try again."
-                    response = choices[0].get("message", {}).get("content", "")
-                    if not response:
-                        logger.warning("nightwire_empty_response")
-                        return False, "The AI provider returned an empty response. Please try again."
-                    logger.info("nightwire_response_success", length=len(response))
+                    parsed = self._parse_response(data)
+                    if parsed is None:
+                        return False, (
+                            "Received an unexpected response from the AI provider. "
+                            "Please try again."
+                        )
 
-                    # Truncate if too long for Signal
-                    if len(response) > 4000:
-                        response = response[:4000] + "\n\n[Response truncated...]"
-
-                    return True, response
+                    logger.info(
+                        "nightwire_response_success",
+                        length=len(parsed.content),
+                        tokens_used=parsed.tokens_used,
+                        model=parsed.model,
+                    )
+                    return True, parsed
                 else:
                     error_text = await resp.text()
-                    logger.error("nightwire_api_error", status=resp.status, error=error_text[:500])
-                    return False, f"nightwire encountered an error (status {resp.status}). Please try again."
+                    logger.error(
+                        "nightwire_api_error",
+                        status=resp.status,
+                        error=error_text[:500],
+                    )
+                    return False, (
+                        f"nightwire encountered an error (status {resp.status}). "
+                        "Please try again."
+                    )
 
         except asyncio.TimeoutError:
             logger.warning("nightwire_timeout", timeout=timeout)
-            return False, "That query required more processing time than anticipated. Perhaps try a more specific question?"
+            return False, (
+                "That query required more processing time than anticipated. "
+                "Perhaps try a more specific question?"
+            )
 
         except Exception as e:
             logger.error("nightwire_exception", error=str(e))
             return False, "I'm experiencing a temporary issue. Please try again."
 
+    async def ask(
+        self,
+        message: str,
+        timeout: int = 60,
+    ) -> Tuple[bool, str]:
+        """Send a query to the configured provider as nightwire AI assistant.
 
-# Backwards compat alias
-SidechannelRunner = NightwireRunner
+        Args:
+            message: The user's message.
+            timeout: Request timeout in seconds.
+
+        Returns:
+            Tuple of (success, response_text).
+        """
+        clean_message = self._clean_message(message)
+        payload = self._build_payload(clean_message)
+
+        success, result = await self._make_request(payload, timeout)
+        if not success:
+            return False, result  # result is an error string
+
+        # result is an AssistantResponse — extract text content
+        content = result.content
+        if len(content) > 4000:
+            content = content[:4000] + "\n\n[Response truncated...]"
+
+        return True, content
+
+    # Deprecated alias — use ask() instead
+    ask_jarvis = ask
+
+    async def ask_with_metadata(
+        self,
+        message: str,
+        timeout: int = 60,
+    ) -> Tuple[bool, Union[AssistantResponse, str]]:
+        """Send a query and return the full AssistantResponse with metadata.
+
+        Same as ask() but returns the AssistantResponse model on success,
+        which includes tokens_used and model fields.
+
+        Args:
+            message: The user's message.
+            timeout: Request timeout in seconds.
+
+        Returns:
+            Tuple of (success, AssistantResponse | error_string).
+        """
+        clean_message = self._clean_message(message)
+        payload = self._build_payload(clean_message)
+
+        success, result = await self._make_request(payload, timeout)
+        if not success:
+            return False, result
+
+        # Truncate content for Signal display limits
+        if len(result.content) > 4000:
+            result = AssistantResponse(
+                content=result.content[:4000] + "\n\n[Response truncated...]",
+                tokens_used=result.tokens_used,
+                model=result.model,
+            )
+
+        return True, result
+
+    async def ask_structured(
+        self,
+        message: str,
+        response_model: Type[T],
+        timeout: int = 60,
+    ) -> Tuple[bool, Union[T, str]]:
+        """Send a query with structured JSON output, returning a Pydantic model.
+
+        Uses the OpenAI-compatible response_format: {"type": "json_object"}
+        to request JSON output, then validates against the provided model.
+
+        Args:
+            message: The user's message (should instruct JSON output format).
+            response_model: Pydantic BaseModel class defining expected schema.
+            timeout: Request timeout in seconds.
+
+        Returns:
+            Tuple of (success, validated_model | error_string).
+        """
+        clean_message = self._clean_message(message)
+        payload = self._build_payload(
+            clean_message,
+            response_format={"type": "json_object"},
+        )
+
+        success, result = await self._make_request(payload, timeout)
+        if not success:
+            return False, result
+
+        # result is an AssistantResponse — parse content as JSON into model
+        raw_content = result.content
+        try:
+            parsed = response_model.model_validate_json(raw_content)
+            logger.info(
+                "nightwire_structured_success",
+                response_model=response_model.__name__,
+                tokens_used=result.tokens_used,
+            )
+            return True, parsed
+        except Exception as parse_err:
+            logger.warning(
+                "nightwire_structured_parse_error",
+                error=str(parse_err)[:200],
+                raw_output=raw_content[:500],
+            )
+            # Fallback: try manual JSON extraction
+            try:
+                data = json.loads(raw_content)
+                parsed = response_model.model_validate(data)
+                return True, parsed
+            except Exception:
+                return False, (
+                    f"Failed to parse structured response: {parse_err}"
+                )
 
 
 # Global instance
@@ -188,7 +398,3 @@ def get_nightwire_runner(
             max_tokens=max_tokens,
         )
     return _nightwire_runner
-
-
-# Backwards compat alias
-get_sidechannel_runner = get_nightwire_runner

@@ -1,4 +1,10 @@
-"""Memory command handlers for Signal bot."""
+"""Memory command handlers for Signal bot.
+
+Provides slash-command handlers for storing explicit memories, searching
+past conversations via semantic search, viewing history, managing
+preferences, and deleting stored data. Each handler is registered via
+``_make_memory_commands()`` in bot.py with project-scoping closures.
+"""
 
 from typing import TYPE_CHECKING, Optional
 
@@ -7,21 +13,49 @@ import structlog
 if TYPE_CHECKING:
     from .manager import MemoryManager
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.memory")
 
 
 class MemoryCommands:
     """Handlers for memory-related slash commands."""
 
     def __init__(self, memory_manager: "MemoryManager"):
+        """Initialize with a MemoryManager instance.
+
+        Args:
+            memory_manager: Provides store, search, and delete operations.
+        """
         self.memory = memory_manager
 
-    async def handle_remember(self, phone: str, args: str, project: Optional[str] = None) -> str:
-        """/remember <text> - Store an explicit memory for current project."""
+    async def handle_remember(
+        self, phone: str, args: str, project: Optional[str] = None,
+    ) -> str:
+        """Store an explicit memory, scoped to the current project.
+
+        Signal usage::
+
+            /remember Always use UTC timestamps in this project
+            /global remember Use snake_case for all Python files
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Text to remember.
+            project: Project scope (None = global).
+
+        Returns:
+            Confirmation with preview and memory ID, or usage help.
+        """
         if not args.strip():
             if project:
-                return f"Usage: /remember <something to remember>\n\nThis will be saved for project: {project}\nUse /global remember for cross-project memories."
-            return "Usage: /remember <something to remember>\n\nNo project selected - this will be a global memory."
+                return (
+                    f"Usage: /remember <something to remember>"
+                    f"\n\nThis will be saved for project: {project}"
+                    f"\nUse /global remember for cross-project memories."
+                )
+            return (
+                "Usage: /remember <something to remember>"
+                "\n\nNo project selected - this will be a global memory."
+            )
 
         content = args.strip()
         memory_id = await self.memory.remember(phone, content, project_name=project)
@@ -29,11 +63,33 @@ class MemoryCommands:
         project_info = f" [{project}]" if project else " [global]"
         return f"Remembered{project_info}: \"{preview}\" (ID: {memory_id})"
 
-    async def handle_recall(self, phone: str, args: str, project: Optional[str] = None) -> str:
-        """/recall <query> - Semantic search past conversations for current project."""
+    async def handle_recall(
+        self, phone: str, args: str, project: Optional[str] = None,
+    ) -> str:
+        """Semantic search over past conversations and stored memories.
+
+        Uses vector embeddings for relevance-based matching.
+
+        Signal usage::
+
+            /recall database migration strategy
+            /global recall deployment process
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Search query text.
+            project: Project scope (None = search all projects).
+
+        Returns:
+            Formatted list of matching memories with previews, or usage help.
+        """
         if not args.strip():
             if project:
-                return f"Usage: /recall <search query>\n\nSearching in project: {project}\nUse /global recall to search all projects."
+                return (
+                    f"Usage: /recall <search query>"
+                    f"\n\nSearching in project: {project}"
+                    f"\nUse /global recall to search all projects."
+                )
             return "Usage: /recall <search query>\n\nNo project selected - searching all projects."
 
         query = args.strip()
@@ -57,8 +113,25 @@ class MemoryCommands:
 
         return "\n".join(lines)
 
-    async def handle_history(self, phone: str, args: str, project: Optional[str] = None) -> str:
-        """/history [count] - Show recent conversation history for current project."""
+    async def handle_history(
+        self, phone: str, args: str, project: Optional[str] = None,
+    ) -> str:
+        """Show recent conversation history for the current project.
+
+        Signal usage::
+
+            /history                        — Last 10 messages (default)
+            /history 20                     — Last 20 messages
+            /global history 30              — Last 30 across all projects
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Optional message count (1-50, default 10).
+            project: Project scope (None = all projects).
+
+        Returns:
+            Chronological list of recent messages with timestamps.
+        """
         limit = 10
         if args.strip():
             try:
@@ -86,7 +159,21 @@ class MemoryCommands:
         return "\n".join(lines)
 
     async def handle_forget(self, phone: str, args: str) -> str:
-        """/forget [all|preferences|today] - Delete memories."""
+        """Delete stored data by scope.
+
+        Signal usage::
+
+            /forget all                     — Delete all your data
+            /forget preferences             — Clear learned preferences only
+            /forget today                   — Delete today's conversations only
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Scope — ``all``, ``preferences``, or ``today``.
+
+        Returns:
+            Confirmation of deletion or usage help.
+        """
         target = args.strip().lower() if args else ""
 
         if not target or target == "help":
@@ -113,8 +200,24 @@ class MemoryCommands:
 
         return "Nothing to delete."
 
-    async def handle_memories(self, phone: str, args: str, project: Optional[str] = None) -> str:
-        """/memories - List stored explicit memories for current project."""
+    async def handle_memories(
+        self, phone: str, args: str, project: Optional[str] = None,
+    ) -> str:
+        """List all explicitly stored memories for the current project.
+
+        Signal usage::
+
+            /memories                       — List project memories
+            /global memories                — List all memories
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Unused.
+            project: Project scope (None = all projects).
+
+        Returns:
+            Numbered list of stored memories with dates and previews.
+        """
         memories = await self.memory.get_memories(phone, limit=20, project_name=project)
 
         if not memories:
@@ -135,7 +238,19 @@ class MemoryCommands:
         return "\n".join(lines)
 
     async def handle_preferences(self, phone: str, args: str) -> str:
-        """/preferences - List learned preferences."""
+        """List automatically learned user preferences grouped by category.
+
+        Signal usage::
+
+            /preferences
+
+        Args:
+            phone: Phone number or UUID of the sender.
+            args: Unused.
+
+        Returns:
+            Preferences grouped by category, or a message if none stored.
+        """
         prefs = await self.memory.get_preferences(phone)
 
         if not prefs:

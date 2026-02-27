@@ -1,33 +1,48 @@
-"""Central coordinator for the autonomous task system."""
+"""Central coordinator for the autonomous task system.
+
+Provides the high-level API used by Signal command handlers to
+manage PRDs, stories, tasks, learnings, and the processing loop.
+Wires together the database, executor, quality runner, learning
+extractor, and autonomous loop into a single facade.
+
+Classes:
+    AutonomousManager: Facade over all autonomous subsystem
+        components. Created once in ``SignalBot.__init__`` and
+        exposed to command handlers via ``BotContext``.
+"""
 
 import sqlite3
-from pathlib import Path
-from typing import Optional, List, Callable, Awaitable
+from typing import Awaitable, Callable, List, Optional
 
 import structlog
 
+from .database import AutonomousDatabase
+from .executor import TaskExecutor
+from .learnings import LearningExtractor
+from .loop import AutonomousLoop
 from .models import (
     PRD,
+    Learning,
+    LearningCategory,
+    LoopStatus,
     PRDStatus,
     Story,
     StoryStatus,
     Task,
     TaskStatus,
-    Learning,
-    LearningCategory,
-    LoopStatus,
 )
-from .database import AutonomousDatabase
-from .executor import TaskExecutor
 from .quality_gates import QualityGateRunner
-from .learnings import LearningExtractor
-from .loop import AutonomousLoop
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.autonomous")
 
 
 class AutonomousManager:
-    """Central coordinator for all autonomous system components."""
+    """Central coordinator for all autonomous system components.
+
+    Facade that composes the database, executor, quality gates,
+    learning extractor, and autonomous loop. All public methods
+    delegate to the appropriate subsystem component.
+    """
 
     def __init__(
         self,
@@ -94,7 +109,17 @@ class AutonomousManager:
         title: str,
         description: str,
     ) -> PRD:
-        """Create a new PRD."""
+        """Create a new PRD in DRAFT status.
+
+        Args:
+            phone_number: Owner's phone number (E.164).
+            project_name: Associated project name.
+            title: PRD title.
+            description: Full PRD description.
+
+        Returns:
+            The created PRD with its assigned database ID.
+        """
         prd = await self.db.create_prd(
             phone_number=phone_number,
             project_name=project_name,
@@ -138,7 +163,19 @@ class AutonomousManager:
         acceptance_criteria: Optional[List[str]] = None,
         priority: int = 0,
     ) -> Story:
-        """Create a new story in a PRD."""
+        """Create a new story in a PRD.
+
+        Args:
+            prd_id: Parent PRD database ID.
+            phone_number: Owner's phone number.
+            title: Story title.
+            description: Story description.
+            acceptance_criteria: Verification checklist.
+            priority: Execution priority (higher = first).
+
+        Returns:
+            The created Story with its assigned database ID.
+        """
         story = await self.db.create_story(
             prd_id=prd_id,
             phone_number=phone_number,
@@ -174,7 +211,20 @@ class AutonomousManager:
         priority: int = 0,
         depends_on: Optional[list] = None,
     ) -> Task:
-        """Create a new task in a story."""
+        """Create a new task in a story.
+
+        Args:
+            story_id: Parent story database ID.
+            phone_number: Owner's phone number.
+            project_name: Project to execute in.
+            title: Task title.
+            description: Detailed task description.
+            priority: Execution priority (higher = first).
+            depends_on: Task IDs this task depends on.
+
+        Returns:
+            The created Task with its assigned database ID.
+        """
         task = await self.db.create_task(
             story_id=story_id,
             phone_number=phone_number,
@@ -207,7 +257,16 @@ class AutonomousManager:
         )
 
     async def queue_story(self, story_id: int) -> int:
-        """Queue all pending tasks for a story. Returns count queued."""
+        """Queue all pending tasks for a story.
+
+        Also transitions the story to IN_PROGRESS status.
+
+        Args:
+            story_id: Database ID of the story.
+
+        Returns:
+            Number of tasks queued.
+        """
         count = await self.db.queue_tasks_for_story(story_id)
 
         # Update story status to in_progress
@@ -217,7 +276,16 @@ class AutonomousManager:
         return count
 
     async def queue_prd(self, prd_id: int) -> int:
-        """Queue all pending tasks for a PRD. Returns count queued."""
+        """Queue all pending tasks across all stories in a PRD.
+
+        Activates the PRD if it is still in DRAFT status.
+
+        Args:
+            prd_id: Database ID of the PRD.
+
+        Returns:
+            Number of tasks queued.
+        """
         count = await self.db.queue_tasks_for_prd(prd_id)
 
         # Update PRD status to active if not already
@@ -246,7 +314,20 @@ class AutonomousManager:
         content: str,
         project_name: Optional[str] = None,
     ) -> int:
-        """Manually add a learning. Returns learning ID."""
+        """Manually add a learning with full confidence.
+
+        Keywords are auto-extracted from content.
+
+        Args:
+            phone_number: Owner's phone number.
+            category: Learning category.
+            title: Brief learning title.
+            content: Full learning content.
+            project_name: Associated project (optional).
+
+        Returns:
+            Database ID of the new learning.
+        """
         learning = Learning(
             phone_number=phone_number,
             project_name=project_name,
@@ -282,7 +363,17 @@ class AutonomousManager:
         project_name: Optional[str] = None,
         limit: int = 10,
     ) -> List[Learning]:
-        """Search learnings by relevance."""
+        """Search learnings by keyword relevance.
+
+        Args:
+            phone_number: Owner's phone number.
+            query: Free-text search query.
+            project_name: Filter by project (optional).
+            limit: Maximum results to return.
+
+        Returns:
+            Learnings sorted by relevance score descending.
+        """
         return await self.db.get_relevant_learnings(
             phone_number=phone_number,
             project_name=project_name,
@@ -291,7 +382,14 @@ class AutonomousManager:
         )
 
     async def decay_learnings(self, days_threshold: int = 30) -> int:
-        """Decay confidence of unused learnings. Returns count affected."""
+        """Decay confidence of unused learnings by 10%.
+
+        Args:
+            days_threshold: Days of inactivity before decay.
+
+        Returns:
+            Number of learnings whose confidence was reduced.
+        """
         count = await self.db.decay_unused_learnings(days_threshold)
         if count > 0:
             logger.info("learnings_decayed", count=count, days_threshold=days_threshold)

@@ -1,8 +1,23 @@
-"""Context builder for prompt injection."""
+"""Context builder for Claude prompt injection.
+
+Assembles user preferences, explicit memories, and relevant
+conversation history into a formatted context string that is
+prepended to Claude prompts. Enforces a configurable token budget
+using a rough character-based estimate (4 chars per token).
+
+Key class:
+    ContextBuilder -- formats and assembles context sections
+        within a token budget. Supports both raw history and
+        pre-summarized context (from HaikuSummarizer).
+"""
 
 from typing import List, Optional
 
-from .models import Preference, ExplicitMemory, SearchResult
+import structlog
+
+from .models import ExplicitMemory, Preference, SearchResult
+
+logger = structlog.get_logger("nightwire.memory")
 
 
 class ContextBuilder:
@@ -81,10 +96,16 @@ class ContextBuilder:
             + "\n---\n\n"
         )
 
+        used_tokens = len(context) // 4  # Rough estimate: 4 chars per token
+        logger.debug("context_budget", max_tokens=self.max_tokens, used_tokens=used_tokens)
+
         return context
 
     def _format_preferences(self, preferences: List[Preference]) -> str:
-        """Format preferences into a section."""
+        """Format preferences grouped by category.
+
+        Limits to 5 preferences per category to avoid bloat.
+        """
         if not preferences:
             return ""
 
@@ -103,7 +124,10 @@ class ContextBuilder:
         return "\n".join(lines)
 
     def _format_memories(self, memories: List[ExplicitMemory]) -> str:
-        """Format explicit memories into a section."""
+        """Format explicit memories as bullet points.
+
+        Limits to 10 memories, each truncated to 200 chars.
+        """
         if not memories:
             return ""
 
@@ -122,7 +146,20 @@ class ContextBuilder:
         history: List[SearchResult],
         max_chars: int
     ) -> str:
-        """Format relevant history into a section."""
+        """Format relevant history as dated conversation snippets.
+
+        Stops adding entries once ``max_chars`` would be exceeded.
+        Each entry is truncated to 300 chars with newlines
+        collapsed.
+
+        Args:
+            history: Ranked search results to format.
+            max_chars: Character budget for this section.
+
+        Returns:
+            Formatted history section, or empty string if no
+            entries fit.
+        """
         if not history:
             return ""
 

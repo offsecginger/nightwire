@@ -5,6 +5,128 @@ All notable changes to nightwire (formerly sidechannel) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-02-27
+
+### Changed — Milestone 7: CLI Runner Migration
+- **Replaced Anthropic Python SDK with Claude Code CLI** — `claude -p` subprocess replaces `anthropic.AsyncAnthropic` for all Claude operations. Supports both Pro/Max OAuth login and API key authentication transparently.
+- Non-streaming: `claude -p --output-format json` → JSON response with `result`, `usage`, `modelUsage`
+- Streaming: `claude -p --output-format stream-json --verbose` → NDJSON events with text chunks
+- Structured output: `claude -p --json-schema '{...}'` → `structured_output` field with Pydantic validation
+- System prompt: `--append-system-prompt-file` with config/CLAUDE.md (replaces SDK `system` parameter)
+- Error classification: text-based `classify_error()` promoted from legacy to primary classifier
+- Cancel: `process.kill()` replaces `stream.close()` + `task.cancel()`
+- `_InvocationState`: `process` field replaces `task`/`stream` fields
+- HaikuSummarizer: migrated from SDK `client.messages.create()` to `claude -p --model haiku` subprocess
+- `claude_max_turns` config: wired into `--max-turns` CLI flag (no longer deprecated)
+- `anthropic` package moved from required to optional dependency (`pip install nightwire[sdk]`)
+
+### Removed
+- `classify_error_from_exception()` — SDK-era error classifier (deleted, not just deprecated)
+- `import anthropic` at module level in `claude_runner.py` and `haiku_summarizer.py`
+
+## [3.0.0] - 2026-02-27
+
+### Changed — Milestone 1: Claude SDK Migration
+- **Replaced Claude CLI subprocess with Anthropic Python SDK** — `claude --print` subprocess calls replaced by `anthropic.AsyncAnthropic` with `client.messages.create()` and `client.messages.stream()`
+- `run_claude()` now calls the Anthropic API directly with native error handling, retry, and progress updates
+- Added `run_claude_structured(response_model)` for Pydantic-validated JSON output via SDK `output_config` json_schema
+- Error classification rewritten for SDK exceptions (`APIStatusError`, `AuthenticationError`, `RateLimitError`) instead of text pattern matching
+- Streaming via `client.messages.stream()` with time-based batching (2-second interval, 50-char minimum) to avoid Signal API flooding
+- Per-invocation state isolation via `_InvocationState` dataclass — concurrent `run_claude()` calls no longer share mutable state
+- Cancel support broadcasts to all active invocations with belt-and-suspenders approach (`stream.close()` + `task.cancel()`)
+- Added `RATE_LIMITED` error category for subscription-level rate limit detection via SDK
+- Timing instrumentation: `response_time_ms`, `input_tokens`, `output_tokens`, `model` logged from SDK response metadata
+- System prompt token budget check warns once when estimated tokens exceed 4,000
+- `sandbox.py` marked as deprecated — SDK runs server-side, Docker sandbox no longer needed
+- Added `anthropic>=0.77.0` to both `pyproject.toml` and `requirements.txt`
+- Config properties added: `claude_model`, `claude_api_key`, `claude_system_prompt`, `anthropic_client_config`
+- Legacy `classify_error()` text-based function (restored as primary in 3.1.0 M7 CLI migration)
+
+### Changed — Milestone 2: Nightwire Assistant Structured Output
+- `NightwireRunner.ask_structured(response_model)` added for JSON mode on any OpenAI-compatible provider via `response_format: {"type": "json_object"}`
+- `AssistantResponse` Pydantic model added with `content`, `tokens_used`, `model` fields
+- `ask_with_metadata()` returns full response metadata including token usage
+- Cleaned up backward-compat aliases: `ask_jarvis` → `ask` (deprecated alias retained)
+- Removed dead `SidechannelRunner` and `get_sidechannel_runner` references
+
+### Changed — Milestone 3: Logging Overhaul
+- **New `nightwire/logging_config.py` module** with `setup_logging(config)` and `sanitize_secrets` processor
+- Subsystem log files with rotation: `bot.log`, `claude.log`, `autonomous.log`, `memory.log`, `plugins.log`, `security.log` (10MB max, 5 backups each)
+- Combined `nightwire.log` for all subsystem output
+- Two-phase logging initialization in `main.py` — defaults before config is loaded, full subsystem setup after
+- All 28+ source files migrated from bare `structlog.get_logger()` to named `structlog.get_logger("nightwire.<subsystem>")`
+- ~30 debug log calls added across all subsystems: SDK params, retry decisions, error classification, command routing, message routing, plugin matchers, task state transitions, git operations, verification I/O, quality gate details, worker dispatch, dependency checks, embedding generation, vector search results, session resolution, context budget
+- **Secret sanitization processor** scrubs API keys (`sk-ant-*`, `sk-*`, `xai-*`), Bearer tokens, and E.164 phone numbers from all log output, including nested dicts
+- Config properties added: `logging_level`, `logging_subsystem_levels`, `logging_max_file_size_mb`, `logging_backup_count`
+
+### Changed — Milestone 4: OOP Refactor — Command Extraction
+- **`nightwire/commands/` package created** with `base.py` and `core.py`
+- `BotContext` dataclass provides shared state (config, runner, project manager, etc.) to all handlers
+- `BaseCommandHandler` ABC defines the handler contract with `get_commands()` and `get_help_lines()`
+- `HandlerRegistry` supports both ABC handler registration and direct `register_external()` for non-ABC handlers
+- `CoreCommandHandler` encapsulates 16 core commands (`/help`, `/projects`, `/select`, `/status`, `/add`, `/remove`, `/new`, `/ask`, `/do`, `/complex`, `/cancel`, `/summary`, `/cooldown`, `/update`, `/nightwire`, `/global`)
+- `BUILTIN_COMMANDS` frozenset in `commands/base.py` is single source of truth (replaces hardcoded set in plugin_loader)
+- **`nightwire/task_manager.py` created** — extracts background task lifecycle management (`start_background_task`, `cancel_current_task`, `create_autonomous_prd`, `get_task_state`)
+- `bot.py` reduced from 1,195 to ~563 lines (53% reduction) — `_handle_command()` is now a 12-line registry lookup
+- Two-phase command registration: core + memory in `__init__`, autonomous in `start()`
+- Autonomous commands registered via direct `register_external()` passthrough (no wrapper class)
+- Memory commands registered via `_make_memory_commands()` factory with project-injecting closures
+- `get_memory_context` extracted as standalone function to eliminate circular dependency
+
+### Changed — Milestone 5: Structured Data Flow (Replace Regex)
+- **9 Pydantic schemas added to `autonomous/models.py`**: `PRDBreakdown`, `StoryBreakdown`, `TaskBreakdown`, `VerificationOutput`, `LearningExtraction`, `ExtractedLearning`, `PytestJsonReport`, `PytestTestResult`, `JestJsonReport`
+- PRD creation uses `run_claude_structured(PRDBreakdown)` with text + `parse_prd_json()` fallback
+- Verification agent uses `_try_structured_verify()` with `VerificationOutput` model — fail-closed override preserved (errors = blocked)
+- `_parse_files_changed()` (4 regex patterns) replaced with `_get_files_changed()` using `git diff --name-only` — git as source of truth
+- Learning extraction uses `extract_with_claude()` with `LearningExtraction` model — regex `LEARNING_MARKERS` kept as fallback
+- Quality gates: JSON report detection for pytest (`pytest-json-report` plugin, cached availability check) and Jest (`--json --outputFile`)
+- `HaikuSummarizer` migrated from Claude CLI subprocess to Anthropic SDK with lazy `_get_client()` and proper `close()` method
+- `close_summarizer()` added to shutdown path via `MemoryManager.close()`
+- Added `pytest-json-report>=1.0` as optional dependency (`[project.optional-dependencies] autonomous`)
+- Every structured SDK call has a real regex/text fallback — zero production risk from SDK failures
+
+### Changed — Milestone 6: Documentation
+- **Module docstrings expanded to multi-line** on all 30+ source files — purpose, key classes, key functions, constants
+- **Args/Returns/Raises docstrings** added to ~140 public methods and ~25 class constructors across all subsystems
+- **Signal usage examples** (RST `::` code blocks) added to all 29 command handlers: 16 in `commands/core.py`, 7 in `autonomous/commands.py`, 6 in `memory/commands.py`
+- Google-style docstring format used consistently throughout
+- Inline comments added for non-obvious logic (e.g., fail-closed verification, session timeout grouping, token budget estimation)
+
+### Fixed
+- All ruff lint violations resolved codebase-wide: 16 I001 (import sort), 19 F401/F541 (unused imports, empty f-strings), 2 E741 (ambiguous variable names), 50+ E501 (line length >100 chars)
+- HTTP connection leak in autonomous executor/verifier — all `ClaudeRunner()` instances now closed via `try/finally` blocks
+- `set_project(None)` crash — fixed with `Optional[Path]` and early return
+- Windows signal handler compatibility in `main.py` — `try/except NotImplementedError` with `SIGINT` fallback
+- Removed dead `SidechannelError = SignalBotError` alias from `exceptions.py`
+- `claude_max_turns` config property now logs deprecation warning (SDK does not support turn limits)
+
+### Security
+- Secret sanitization processor automatically scrubs API keys, Bearer tokens, and phone numbers from all log output
+- Fail-closed verification preserved through structured output migration — SDK parse errors default to "blocked"
+- No secrets logged anywhere — audit confirmed across all `logger.*()` calls
+- Input sanitization unchanged — control characters, bidi overrides, and length limits enforced at boundary
+- Phone number masking maintained in all log paths
+
+### Added
+- `nightwire/commands/` package (M4)
+- `nightwire/task_manager.py` (M4)
+- `nightwire/logging_config.py` (M3)
+- `tests/test_claude_runner.py` — 4 `_InvocationState` concurrency isolation tests
+- `tests/test_benchmark_sdk.py` — 9 SDK performance validation tests (2 real-API behind `NIGHTWIRE_BENCHMARK=1` gate)
+- `tests/test_logging_config.py` — 29 logging configuration and secret sanitization tests
+- `tests/test_commands_base.py` — 27 handler registry and base class tests
+- `tests/test_commands_core.py` — 30 core command handler tests
+- `tests/test_task_manager.py` — 11 background task management tests
+- `tests/test_integration_routing.py` — 12 message routing integration tests
+- `tests/memory/test_haiku_summarizer.py` — 11 Haiku summarizer unit tests
+- `tests/test_structured_output.py` — 19 structured data flow tests
+
+### Deprecated
+- `nightwire/sandbox.py` — Docker sandbox no longer needed (SDK runs server-side). Import triggers `DeprecationWarning`.
+- ~~`classify_error()` in `claude_runner.py`~~ — **Undeprecated in 3.1.0** (M7 CLI migration promoted it back to primary; `classify_error_from_exception()` was deleted).
+- `ask_jarvis()` in `nightwire_runner.py` — use `ask()` instead.
+- `GrokRunnerError` and `MusicControlError` in `exceptions.py` — no production callers remain.
+
 ## [2.2.0] - 2026-02-25
 
 ### Changed

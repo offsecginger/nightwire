@@ -1,13 +1,35 @@
-"""Pydantic models for the autonomous task system."""
+"""Pydantic models for the autonomous task system.
+
+Defines the domain models for the PRD-Story-Task hierarchy, execution
+results, quality gate outputs, verification results, and Claude
+structured output schemas.
+
+Domain models (stored in DB):
+    PRD, Story, Task, Learning, QualityGateResult, VerificationResult,
+    TaskExecutionResult, AutonomousContext, LoopStatus
+
+Enums:
+    PRDStatus, StoryStatus, TaskStatus, EffortLevel, TaskType,
+    LearningCategory
+
+Structured output schemas (intermediate, not stored):
+    PRDBreakdown, StoryBreakdown, TaskBreakdown, VerificationOutput,
+    LearningExtraction, ExtractedLearning, PytestJsonReport,
+    PytestTestResult, JestJsonReport
+"""
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List, Any
+from typing import Any, List, Optional
+
 from pydantic import BaseModel, Field
 
 
 class PRDStatus(str, Enum):
-    """Status of a Product Requirements Document."""
+    """Lifecycle status of a Product Requirements Document.
+
+    Flow: DRAFT -> ACTIVE -> COMPLETED or ARCHIVED.
+    """
     DRAFT = "draft"
     ACTIVE = "active"
     COMPLETED = "completed"
@@ -24,7 +46,11 @@ class StoryStatus(str, Enum):
 
 
 class TaskStatus(str, Enum):
-    """Status of an autonomous task."""
+    """Lifecycle status of an autonomous task.
+
+    Flow: PENDING -> QUEUED -> IN_PROGRESS -> RUNNING_TESTS ->
+    VERIFYING -> COMPLETED | FAILED | BLOCKED | CANCELLED.
+    """
     PENDING = "pending"
     QUEUED = "queued"
     IN_PROGRESS = "in_progress"
@@ -37,7 +63,11 @@ class TaskStatus(str, Enum):
 
 
 class EffortLevel(str, Enum):
-    """Claude effort level for adaptive thinking."""
+    """Claude effort level for adaptive thinking.
+
+    Maps to the ``thinking.budget_tokens`` parameter in the
+    Anthropic SDK. Higher effort = more thinking tokens.
+    """
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -45,7 +75,11 @@ class EffortLevel(str, Enum):
 
 
 class TaskType(str, Enum):
-    """Task type for effort level mapping."""
+    """Task type used to auto-select the effort level.
+
+    Detected from task title/description keywords in
+    ``executor.detect_task_type()``.
+    """
     PRD_BREAKDOWN = "prd_breakdown"
     IMPLEMENTATION = "implementation"
     BUG_FIX = "bug_fix"
@@ -55,7 +89,11 @@ class TaskType(str, Enum):
 
 
 class LearningCategory(str, Enum):
-    """Category of extracted learning."""
+    """Category of extracted learning.
+
+    Used to classify learnings for relevance scoring and
+    context injection into future task prompts.
+    """
     PATTERN = "pattern"
     PITFALL = "pitfall"
     BEST_PRACTICE = "best_practice"
@@ -67,7 +105,11 @@ class LearningCategory(str, Enum):
 
 
 class PRD(BaseModel):
-    """Product Requirements Document."""
+    """Product Requirements Document.
+
+    Top-level container in the PRD -> Story -> Task hierarchy.
+    Contains computed story counts populated by DB joins.
+    """
 
     id: Optional[int] = None
     phone_number: str = Field(..., description="Owner's phone number (E.164)")
@@ -88,7 +130,11 @@ class PRD(BaseModel):
 
 
 class Story(BaseModel):
-    """User story within a PRD."""
+    """User story within a PRD.
+
+    Groups related tasks under acceptance criteria. Contains
+    computed task counts populated by DB joins.
+    """
 
     id: Optional[int] = None
     prd_id: int = Field(..., description="Parent PRD ID")
@@ -115,7 +161,12 @@ class Story(BaseModel):
 
 
 class Task(BaseModel):
-    """Atomic task for autonomous execution."""
+    """Atomic task for autonomous execution.
+
+    The smallest unit of work. Executed in a fresh Claude context
+    with git safety, optional verification, and quality gates.
+    Supports dependency-aware parallel scheduling.
+    """
 
     id: Optional[int] = None
     story_id: int = Field(..., description="Parent story ID")
@@ -152,7 +203,12 @@ class Task(BaseModel):
 
 
 class Learning(BaseModel):
-    """Persistent learning extracted from task execution."""
+    """Persistent learning extracted from task execution.
+
+    Learnings are semantically searchable and injected into
+    future task prompts for context continuity. Confidence
+    decays over time for unused learnings.
+    """
 
     id: Optional[int] = None
     phone_number: str = Field(..., description="Owner's phone number")
@@ -180,7 +236,11 @@ class Learning(BaseModel):
 
 
 class QualityGateResult(BaseModel):
-    """Results from quality gate checks."""
+    """Results from quality gate checks.
+
+    Captures test counts, typecheck/lint pass/fail, and whether
+    new regressions were introduced vs a pre-task baseline.
+    """
 
     passed: bool = Field(..., description="Overall pass/fail")
     tests_run: int = Field(default=0, description="Total tests executed")
@@ -206,7 +266,12 @@ class QualityGateResult(BaseModel):
 
 
 class VerificationResult(BaseModel):
-    """Result from independent verification agent."""
+    """Result from independent verification agent.
+
+    Fail-closed: if security_concerns or logic_errors are
+    non-empty, passed is forced False regardless of what the
+    verifier returned.
+    """
 
     passed: bool = Field(..., description="Whether verification passed")
     issues: List[str] = Field(
@@ -230,7 +295,12 @@ class VerificationResult(BaseModel):
 
 
 class TaskExecutionResult(BaseModel):
-    """Result of autonomous task execution."""
+    """Result of autonomous task execution.
+
+    Aggregates Claude output, files changed, quality gate
+    results, verification results, and extracted learnings
+    into a single result object.
+    """
 
     task_id: int = Field(..., description="Executed task ID")
     success: bool = Field(..., description="Overall success status")
@@ -254,7 +324,12 @@ class TaskExecutionResult(BaseModel):
 
 
 class AutonomousContext(BaseModel):
-    """Context assembled for task execution."""
+    """Context assembled for task execution.
+
+    Injected into the Claude prompt to provide learnings from
+    previous tasks, parent story/PRD context, and completed
+    sibling tasks for continuity.
+    """
 
     learnings: List[Learning] = Field(
         default_factory=list, description="Relevant learnings"
@@ -268,7 +343,11 @@ class AutonomousContext(BaseModel):
 
 
 class LoopStatus(BaseModel):
-    """Status of the autonomous processing loop."""
+    """Status snapshot of the autonomous processing loop.
+
+    Returned by ``AutonomousLoop.get_status()`` for the
+    ``/autonomous status`` Signal command.
+    """
 
     is_running: bool = Field(default=False, description="Whether loop is active")
     is_paused: bool = Field(default=False, description="Whether loop is paused")
@@ -284,3 +363,139 @@ class LoopStatus(BaseModel):
     tasks_failed_today: int = Field(default=0, description="Tasks failed today")
     last_task_completed_at: Optional[datetime] = None
     uptime_seconds: float = Field(default=0.0, description="Loop uptime")
+
+
+# ---------------------------------------------------------------------------
+# Claude Structured Output Schemas
+# These define the JSON schema Claude returns via run_claude_structured().
+# They are NOT stored in the database — they are intermediate parsing models
+# that get mapped to domain models (PRD/Story/Task/etc.) for persistence.
+# ---------------------------------------------------------------------------
+
+
+class TaskBreakdown(BaseModel):
+    """A single task in a PRD breakdown from Claude.
+
+    Intermediate schema -- mapped to ``Task`` for DB storage.
+    """
+
+    title: str = Field(..., max_length=80, description="Task title")
+    description: str = Field(..., description="Detailed task description")
+    priority: int = Field(
+        default=5, ge=1, le=100, description="Execution priority (higher=first)"
+    )
+
+
+class StoryBreakdown(BaseModel):
+    """A single story in a PRD breakdown from Claude.
+
+    Intermediate schema -- mapped to ``Story`` for DB storage.
+    """
+
+    title: str = Field(..., max_length=80, description="Story title")
+    description: str = Field(..., description="What this story accomplishes")
+    tasks: List[TaskBreakdown] = Field(
+        ..., min_length=1, description="Tasks within this story"
+    )
+
+
+class PRDBreakdown(BaseModel):
+    """Complete PRD breakdown returned by Claude structured output.
+
+    Used by ``run_claude_structured()`` in the PRD creation
+    flow. Mapped to PRD + Story + Task domain models.
+    """
+
+    prd_title: str = Field(..., max_length=100, description="Brief PRD title")
+    prd_description: str = Field(..., description="One paragraph summary")
+    stories: List[StoryBreakdown] = Field(
+        ..., min_length=1, description="Stories within this PRD"
+    )
+
+
+class VerificationOutput(BaseModel):
+    """Claude's raw verification response schema.
+
+    Note: The 'passed' field from Claude is OVERRIDDEN by fail-closed logic.
+    If security_concerns or logic_errors are non-empty, passed is forced False.
+    """
+
+    passed: bool = Field(..., description="Whether verification passed")
+    issues: List[str] = Field(default_factory=list, description="Issues found")
+    security_concerns: List[str] = Field(
+        default_factory=list, description="Security issues"
+    )
+    logic_errors: List[str] = Field(
+        default_factory=list, description="Logic errors"
+    )
+    suggestions: List[str] = Field(
+        default_factory=list, description="Improvement suggestions"
+    )
+
+
+class ExtractedLearning(BaseModel):
+    """A single learning extracted by Claude from task output.
+
+    Intermediate schema -- mapped to ``Learning`` for DB storage.
+    """
+
+    category: str = Field(
+        ...,
+        description="One of: pattern, pitfall, best_practice, "
+        "project_context, debugging, architecture, testing, tool_usage",
+    )
+    title: str = Field(..., max_length=80, description="Brief learning title")
+    content: str = Field(..., description="Full learning content")
+    relevance_keywords: List[str] = Field(
+        default_factory=list, description="Keywords for search matching"
+    )
+    confidence: float = Field(
+        default=0.7, ge=0.0, le=1.0, description="Confidence score"
+    )
+
+
+class LearningExtraction(BaseModel):
+    """Claude's structured extraction of learnings from task output.
+
+    Wrapper for the list of ``ExtractedLearning`` items returned
+    by ``run_claude_structured()``.
+    """
+
+    learnings: List[ExtractedLearning] = Field(
+        default_factory=list, description="Extracted learnings (0-5)"
+    )
+
+
+class PytestTestResult(BaseModel):
+    """Parsed pytest JSON report summary.
+
+    Subset of the ``pytest-json-report`` plugin output fields.
+    """
+
+    total: int = 0
+    passed: int = 0
+    failed: int = 0
+    error: int = 0
+    skipped: int = 0
+
+
+class PytestJsonReport(BaseModel):
+    """Top-level pytest-json-report output.
+
+    Only the fields needed for quality gate parsing.
+    """
+
+    summary: PytestTestResult = Field(default_factory=PytestTestResult)
+    exitcode: int = 0
+
+
+class JestJsonReport(BaseModel):
+    """Top-level Jest ``--json`` output.
+
+    Only the fields needed for quality gate parsing.
+    """
+
+    numTotalTests: int = 0
+    numPassedTests: int = 0
+    numFailedTests: int = 0
+    success: bool = False

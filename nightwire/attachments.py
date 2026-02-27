@@ -1,4 +1,18 @@
-"""Attachment handling for Signal bot - download, validate, and save image attachments."""
+"""Attachment handling for Signal bot.
+
+Downloads, validates, and saves image attachments received via
+the Signal CLI REST API. Enforces size limits (50 MB), MIME type
+allowlisting, and SSRF-safe attachment ID validation.
+
+Key functions:
+    download_attachment: Fetch raw bytes from Signal API.
+    save_attachment: Write bytes to disk with sender isolation.
+    process_attachments: Batch download + save for a message.
+
+Constants:
+    SUPPORTED_IMAGE_TYPES: MIME types accepted for Claude vision.
+    MAX_ATTACHMENT_SIZE: Hard cap on attachment download size.
+"""
 
 import re
 import uuid
@@ -9,7 +23,7 @@ from typing import Dict, List, Optional
 import aiohttp
 import structlog
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.bot")
 
 # Supported image MIME types for Claude vision
 MAX_ATTACHMENT_SIZE = 50_000_000  # 50MB
@@ -52,7 +66,10 @@ async def download_attachment(
                 async for chunk in resp.content.iter_chunked(8192):
                     total += len(chunk)
                     if total > MAX_ATTACHMENT_SIZE:
-                        logger.warning("attachment_too_large_streaming", attachment_id=attachment_id)
+                        logger.warning(
+                            "attachment_too_large_streaming",
+                            attachment_id=attachment_id,
+                        )
                         return None
                     chunks.append(chunk)
                 data = b"".join(chunks)
@@ -62,7 +79,12 @@ async def download_attachment(
                 logger.error("attachment_download_failed", id=attachment_id, status=resp.status)
                 return None
     except aiohttp.ClientError as e:
-        logger.error("attachment_download_error", id=attachment_id, error=str(e), error_type=type(e).__name__)
+        logger.error(
+            "attachment_download_error",
+            id=attachment_id,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
         return None
 
 
@@ -104,7 +126,12 @@ def save_attachment(
         logger.info("attachment_saved", path=str(file_path), size=len(attachment_data))
         return file_path
     except OSError as e:
-        logger.error("attachment_save_error", path=str(file_path), error=str(e), error_type=type(e).__name__)
+        logger.error(
+            "attachment_save_error",
+            path=str(file_path),
+            error=str(e),
+            error_type=type(e).__name__,
+        )
         return None
 
 

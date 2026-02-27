@@ -1,17 +1,23 @@
-"""Security module for nightwire."""
+"""Security module for nightwire.
+
+Provides phone/UUID-based authorization, per-user in-memory rate limiting,
+project-path validation against directory traversal, input sanitization for
+command-line safety, and phone number masking for log privacy.
+"""
 
 import asyncio
 import functools
 import re
 import time
-import structlog
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
+import structlog
+
 from .config import get_config
 
-logger = structlog.get_logger()
+logger = structlog.get_logger("nightwire.security")
 
 # Simple in-memory rate limiter
 _rate_limit_data: dict = defaultdict(list)
@@ -167,14 +173,14 @@ def require_valid_project_path(func):
     def sync_wrapper(*args, **kwargs):
         path = _extract_path(args, kwargs)
         if validate_project_path(str(path)) is None:
-            raise ValueError(f"Path validation failed: access denied")
+            raise ValueError("Path validation failed: access denied")
         return func(*args, **kwargs)
 
     @functools.wraps(func)
     async def async_wrapper(*args, **kwargs):
         path = _extract_path(args, kwargs)
         if validate_project_path(str(path)) is None:
-            raise ValueError(f"Path validation failed: access denied")
+            raise ValueError("Path validation failed: access denied")
         return await func(*args, **kwargs)
 
     if asyncio.iscoroutinefunction(func):

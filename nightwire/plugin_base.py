@@ -1,4 +1,20 @@
-"""Plugin base class and types for nightwire extensibility."""
+"""Plugin base class and types for nightwire extensibility.
+
+Defines the plugin contract: subclass NightwirePlugin, place it in
+``plugins/<name>/plugin.py``, and the PluginLoader will discover and
+manage its lifecycle automatically.
+
+Key classes:
+    PluginContext: Sandboxed interface plugins use to interact with
+        the bot (send messages, read config, access data directory).
+    NightwirePlugin: ABC that all plugins must subclass.
+    MessageMatcher: Priority-ordered message interceptor registered
+        by plugins for non-command message handling.
+    HelpSection: Structured help text contributed by a plugin.
+
+Type aliases:
+    CommandHandler: ``async (sender, args) -> str``.
+"""
 
 import os
 from dataclasses import dataclass, field
@@ -6,7 +22,6 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import structlog
-
 
 # Type alias for command handlers: async (sender: str, args: str) -> str
 CommandHandler = Callable[[str, str], Awaitable[str]]
@@ -55,13 +70,23 @@ class PluginContext:
         allowed_numbers: List[str],
         data_dir: Path,
     ):
+        """Initialize plugin context.
+
+        Args:
+            plugin_name: Unique plugin directory name.
+            send_message: Async callback to send a Signal message.
+            settings: Full settings.yaml dict (only the plugin's
+                own section is exposed via get_config).
+            allowed_numbers: Read-only copy of authorized numbers.
+            data_dir: Plugin-specific data directory on disk.
+        """
         self.plugin_name = plugin_name
         self._send_message = send_message
         # Only expose the plugin's own config section, not full settings
         self._plugin_settings = settings.get("plugins", {}).get(plugin_name, {})
         self.allowed_numbers = list(allowed_numbers)  # Read-only copy
         self.data_dir = data_dir
-        self.logger = structlog.get_logger(plugin=plugin_name)
+        self.logger = structlog.get_logger("nightwire.plugins", plugin=plugin_name)
 
     def get_config(self, key: str, default: Any = None) -> Any:
         """Read a value from plugins.<plugin_name>.<key> in settings.yaml."""

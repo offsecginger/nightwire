@@ -2,6 +2,7 @@
 
 # Core
 aiohttp>=3.9.0
+# anthropic>=0.77.0  # Optional — only for direct SDK usage (pip install nightwire[sdk])
 pyyaml>=6.0
 python-dotenv>=1.0.0
 structlog>=24.0.0
@@ -12,3 +13,6 @@ sentence-transformers>=2.2.0
 
 # Vector search in SQLite (semantic search)
 sqlite-vec>=0.1.1
+
+# Resource Utilization
+psutil

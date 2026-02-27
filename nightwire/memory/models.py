@@ -1,7 +1,13 @@
-"""Pydantic models for the memory system."""
+"""Pydantic models for the memory system.
+
+Defines User, Session, Conversation, Preference, ExplicitMemory,
+SearchResult, and MemoryContext — the core data structures for
+episodic memory, semantic search, and context injection.
+"""
 
 from datetime import datetime
-from typing import Optional, List, Any
+from typing import Any, List, Optional
+
 from pydantic import BaseModel, Field
 
 

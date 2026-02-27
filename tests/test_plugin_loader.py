@@ -1,8 +1,7 @@
 """Tests for plugin loader allowlist."""
 
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import AsyncMock
 
 from nightwire.plugin_loader import PluginLoader
 
