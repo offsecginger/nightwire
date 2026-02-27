@@ -663,6 +663,50 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+# Optional: Docker sandbox for Claude CLI execution
+# -----------------------------------------------------------------------------
+if command -v docker &> /dev/null && docker info &> /dev/null; then
+    echo ""
+    echo -e "  ${BLUE}Optional:${NC} nightwire can run Claude CLI inside a Docker sandbox"
+    echo "  for additional security isolation. This builds a container image"
+    echo "  with Python, Node.js, and Claude CLI."
+    echo ""
+    read -p "  Enable Docker sandbox? [y/N] " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo ""
+        echo -e "  ${BLUE}Building sandbox image...${NC}"
+        SANDBOX_BUILD_LOG="$LOGS_DIR/sandbox-build.log"
+        if docker build -t nightwire-sandbox:latest -f "$INSTALL_DIR/Dockerfile.sandbox" "$INSTALL_DIR" > "$SANDBOX_BUILD_LOG" 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Sandbox image built: nightwire-sandbox:latest"
+            # Add sandbox config to settings.yaml (idempotent — skip if already present)
+            if ! grep -q "^sandbox:" "$SETTINGS_FILE" 2>/dev/null; then
+                cat >> "$SETTINGS_FILE" << 'SANDBOXEOF'
+
+# Docker sandbox for Claude CLI execution
+sandbox:
+  enabled: true
+  image: "nightwire-sandbox:latest"
+  network: false
+  memory_limit: "2g"
+  cpu_limit: 2.0
+SANDBOXEOF
+                echo -e "  ${GREEN}✓${NC} Sandbox config added to settings.yaml"
+            else
+                echo -e "  ${GREEN}✓${NC} Sandbox config already present in settings.yaml"
+            fi
+        else
+            echo -e "  ${RED}Sandbox image build failed.${NC}"
+            echo "  Last 10 lines of build log:"
+            tail -10 "$SANDBOX_BUILD_LOG" 2>/dev/null
+            echo ""
+            echo -e "  Build log: ${CYAN}$SANDBOX_BUILD_LOG${NC}"
+            echo -e "  To build manually: ${CYAN}docker build -t nightwire-sandbox:latest -f Dockerfile.sandbox .${NC}"
+        fi
+    fi
+fi
+
+# -----------------------------------------------------------------------------
 # Signal Pairing — automatic, no choices
 # -----------------------------------------------------------------------------
 SIGNAL_PAIRED=false

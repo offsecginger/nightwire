@@ -235,6 +235,52 @@ class ClaudeRunner:
         """Remove a completed invocation from the active set."""
         self._active_invocations.pop(inv_id, None)
 
+    async def _maybe_sandbox(
+        self,
+        cmd: list,
+        effective_project: Optional[Path],
+        cwd: Optional[str],
+    ) -> Tuple[list, Optional[str]]:
+        """Optionally wrap command in Docker sandbox.
+
+        If ``sandbox.enabled`` is True in config, validates Docker
+        availability and wraps the command using
+        :func:`sandbox.build_sandbox_command`. When sandboxed, cwd
+        is set to None (Docker manages the working directory).
+
+        Args:
+            cmd: Original CLI command list.
+            effective_project: Project directory path.
+            cwd: Original working directory string.
+
+        Returns:
+            Tuple of (possibly-wrapped cmd, possibly-cleared cwd).
+        """
+        if not self.config.sandbox_enabled or effective_project is None:
+            return cmd, cwd
+        try:
+            from .sandbox import (
+                SandboxConfig,
+                build_sandbox_command,
+                validate_docker_available,
+            )
+            available, error = await asyncio.to_thread(
+                validate_docker_available,
+            )
+            if not available:
+                logger.warning("sandbox_docker_unavailable", error=error)
+                return cmd, cwd
+            sandbox_cfg = SandboxConfig(**self.config.sandbox_config)
+            sandbox_cfg.enabled = True
+            wrapped = build_sandbox_command(
+                cmd, effective_project, sandbox_cfg,
+            )
+            # Docker manages cwd via -w flag
+            return wrapped, None
+        except Exception as e:
+            logger.warning("sandbox_wrap_error", error=str(e))
+            return cmd, cwd
+
     def set_project(self, project_path: Optional[Path]):
         """Set or clear the current project directory.
 
@@ -484,6 +530,9 @@ class ClaudeRunner:
             json_schema=json_schema,
         )
 
+        # Wrap in Docker sandbox if enabled
+        cmd, cwd = await self._maybe_sandbox(cmd, effective_project, cwd)
+
         logger.debug(
             "claude_cli_exec",
             cmd_length=len(cmd),
@@ -706,6 +755,9 @@ class ClaudeRunner:
         cmd = self._build_command(
             output_format="stream-json", verbose=True,
         )
+
+        # Wrap in Docker sandbox if enabled
+        cmd, cwd = await self._maybe_sandbox(cmd, effective_project, cwd)
 
         try:
             process = await asyncio.create_subprocess_exec(

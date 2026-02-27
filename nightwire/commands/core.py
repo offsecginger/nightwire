@@ -7,7 +7,8 @@ complex, cancel, summary, cooldown, update, nightwire/sidechannel, global.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional
 
 import structlog
 
@@ -272,7 +273,10 @@ class CoreCommandHandler(BaseCommandHandler):
             )
         return msg
 
-    async def handle_ask(self, sender: str, args: str) -> Optional[str]:
+    async def handle_ask(
+        self, sender: str, args: str,
+        image_paths: Optional[List[Path]] = None,
+    ) -> Optional[str]:
         """Ask Claude a question about the currently selected project.
 
         Runs in the background. Returns None once the task is started
@@ -286,6 +290,8 @@ class CoreCommandHandler(BaseCommandHandler):
         Args:
             sender: Phone number or UUID of the message sender.
             args: The question to ask Claude.
+            image_paths: Optional list of saved image file paths from
+                Signal attachments.
 
         Returns:
             Error message string, or None if the background task started.
@@ -306,10 +312,14 @@ class CoreCommandHandler(BaseCommandHandler):
             sender,
             f"Answer this question about the codebase: {args}",
             current_project,
+            image_paths=image_paths,
         )
         return None
 
-    async def handle_do(self, sender: str, args: str) -> Optional[str]:
+    async def handle_do(
+        self, sender: str, args: str,
+        image_paths: Optional[List[Path]] = None,
+    ) -> Optional[str]:
         """Execute a coding task with Claude on the current project.
 
         Runs in the background with streaming output. The default handler
@@ -323,6 +333,8 @@ class CoreCommandHandler(BaseCommandHandler):
         Args:
             sender: Phone number or UUID of the message sender.
             args: Task description for Claude to execute.
+            image_paths: Optional list of saved image file paths from
+                Signal attachments.
 
         Returns:
             Error message string, or None if the background task started.
@@ -340,7 +352,8 @@ class CoreCommandHandler(BaseCommandHandler):
 
         await self.ctx.send_message(sender, "Working on it...")
         self.ctx.task_manager.start_background_task(
-            sender, args, current_project
+            sender, args, current_project,
+            image_paths=image_paths,
         )
         return None
 

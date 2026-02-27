@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 import aiohttp
 import structlog
 
+from .attachments import SUPPORTED_IMAGE_TYPES, process_attachments
 from .claude_runner import get_runner
 from .commands.base import BotContext, HandlerRegistry
 from .commands.core import CoreCommandHandler, get_memory_context
@@ -285,9 +286,10 @@ class SignalBot:
     async def stop(self):
         """Stop the bot and clean up all resources.
 
-        Stops plugins, cancels cooldown timer, stops updater and
-        autonomous loop, closes runners and HTTP session, then
-        closes the memory system.
+        Shutdown order: stop subsystems, cancel Claude processes and
+        background tasks, THEN close HTTP session and database.
+        This prevents use-after-close crashes when background tasks
+        try to send final messages during shutdown.
         """
         if not self.running:
             return
@@ -301,9 +303,13 @@ class SignalBot:
             await self.autonomous_manager.stop_loop()
         if self.nightwire_runner:
             await self.nightwire_runner.close()
+        # Cancel active Claude processes and background tasks BEFORE
+        # closing session — tasks may need the session for final messages
+        await self.runner.cancel()
+        await self.task_manager.cancel_all_tasks()
+        # Now safe to close network and database resources
         if self.session:
             await self.session.close()
-        await self.runner.cancel()
         await self.runner.close()
         await self.memory.close()
         logger.info("bot_stopped")
@@ -363,7 +369,7 @@ class SignalBot:
             logger.error("send_error", error=str(e))
 
     async def _handle_command(
-        self, command: str, args: str, sender: str
+        self, command: str, args: str, sender: str, image_paths=None
     ) -> Optional[str]:
         """Route a /command to the handler registry or plugins.
 
@@ -371,6 +377,8 @@ class SignalBot:
             command: Command name (without leading /).
             args: Everything after the command name.
             sender: Phone number or UUID of the sender.
+            image_paths: Optional list of saved image file paths.
+                Only forwarded to ask/do commands.
 
         Returns:
             Response string, or None if handled asynchronously.
@@ -381,6 +389,9 @@ class SignalBot:
         # Check registered command handlers
         handler = self._registry.get(command)
         if handler:
+            # Only ask/do accept image_paths — all others keep (sender, args)
+            if image_paths and command in ("ask", "do"):
+                return await handler(sender, args, image_paths=image_paths)
             return await handler(sender, args)
 
         # Check plugin commands
@@ -390,7 +401,9 @@ class SignalBot:
 
         return f"Unknown command: /{command}\nUse /help to see available commands."
 
-    async def _process_message(self, sender: str, message: str):
+    async def _process_message(
+        self, sender: str, message: str, image_paths=None
+    ):
         """Process an incoming message through the full routing chain.
 
         Routing order: /commands -> plugin matchers -> nightwire
@@ -400,6 +413,9 @@ class SignalBot:
         Args:
             sender: Phone number or UUID of the sender.
             message: Raw message text.
+            image_paths: Optional list of saved image file paths from
+                attachments. Forwarded to ask/do commands and the
+                default handler for Claude's agentic Read tool.
         """
         if not is_authorized(sender):
             logger.warning("unauthorized_message", sender="..." + sender[-4:])
@@ -446,7 +462,9 @@ class SignalBot:
             args = parts[1] if len(parts) > 1 else ""
 
             logger.debug("message_routing", is_command=True, routing_path="command")
-            response = await self._handle_command(command, args, sender)
+            response = await self._handle_command(
+                command, args, sender, image_paths=image_paths
+            )
         else:
             response = None
             for matcher in self.plugin_loader.get_sorted_matchers():
@@ -475,9 +493,15 @@ class SignalBot:
                     else:
                         await self._send_message(sender, "Working on it...")
                         self.task_manager.start_background_task(
-                            sender, message, project_name
+                            sender, message, project_name,
+                            image_paths=image_paths,
                         )
                         return
+                elif image_paths:
+                    response = (
+                        "Image received but no project selected. "
+                        "Use /select <project> first, then send images."
+                    )
                 else:
                     response = (
                         "No project selected. Use /projects to list"
@@ -551,10 +575,12 @@ class SignalBot:
                 or envelope.get("sourceUuid")
             )
             message_text = None
+            attachments = []
 
             data_message = envelope.get("dataMessage")
             if data_message:
                 message_text = data_message.get("message", "")
+                attachments = data_message.get("attachments", [])
 
             sync_message = envelope.get("syncMessage")
             if sync_message and not message_text:
@@ -569,9 +595,37 @@ class SignalBot:
                     if destination and destination == self.account:
                         message_text = sent_message.get("message", "")
                         source = self.account
+                        if not attachments:
+                            attachments = sent_message.get("attachments", [])
 
+            # Process image attachments if present
+            image_paths = []
+            if attachments and source and is_authorized(source):
+                image_attachments = [
+                    a for a in attachments
+                    if a.get("contentType", "") in SUPPORTED_IMAGE_TYPES
+                ]
+                if image_attachments and self.session:
+                    image_paths = await process_attachments(
+                        attachments=image_attachments,
+                        sender=source,
+                        session=self.session,
+                        signal_api_url=self.config.signal_api_url,
+                        attachments_dir=self.config.attachments_dir,
+                    )
+                    if image_paths:
+                        logger.info(
+                            "images_processed",
+                            count=len(image_paths),
+                            sender="..." + source[-4:],
+                        )
+
+            # Allow image-only messages (no text) — default to describe prompt
             if not message_text or not message_text.strip():
-                return
+                if image_paths:
+                    message_text = "Describe this image."
+                else:
+                    return
             if not source:
                 return
 
@@ -598,8 +652,12 @@ class SignalBot:
             logger.info(
                 "processing_message",
                 source="..." + source[-4:], length=len(message_text),
+                images=len(image_paths) if image_paths else 0,
             )
-            await self._process_message(source, message_text)
+            await self._process_message(
+                source, message_text,
+                image_paths=image_paths if image_paths else None,
+            )
 
         except Exception as e:
             logger.error(

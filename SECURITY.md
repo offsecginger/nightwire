@@ -72,6 +72,20 @@ You should receive a response within 48 hours. We will work with you to understa
 - Use `allowed_paths` to restrict which directories Claude can access
 - Optional: Enable Docker sandbox (`sandbox.enabled: true`) for task execution
 
+### Docker Sandbox Hardening (Optional)
+When sandbox is enabled, Claude CLI runs inside a hardened container:
+- **Non-root execution**: `--user 1000:1000` (dedicated sandbox user)
+- **No privilege escalation**: `--security-opt no-new-privileges`
+- **All capabilities dropped**: `--cap-drop ALL`
+- **PID limits**: `--pids-limit 256` (prevents fork bombs)
+- **Memory limits**: Configurable (default 2GB)
+- **CPU limits**: Configurable (default 2 cores)
+- **Network isolation**: `--network=none` by default (opt-in via config)
+- **tmpfs /tmp**: Writable temp space without disk persistence
+- **Read-write mount**: Only the project directory is mounted
+- Docker availability is validated with PermissionError handling
+- Build via: `docker build -t nightwire-sandbox:latest -f Dockerfile.sandbox .`
+
 ### Plugin Security
 - Use `plugin_allowlist` in settings.yaml to restrict which plugins load
 - Review plugin code before adding to the plugins directory

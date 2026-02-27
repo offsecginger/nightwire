@@ -502,6 +502,18 @@ class Config:
         return Path(self.config_dir).parent / "plugins"
 
     @property
+    def attachments_dir(self) -> Path:
+        """Get attachments storage directory path.
+
+        Configurable via ``attachments_dir`` in settings.yaml.
+        Defaults to ``data/attachments/`` relative to the install directory.
+        """
+        configured = self.settings.get("attachments_dir")
+        if configured:
+            return Path(configured).expanduser()
+        return Path(self.config_dir).parent / "data" / "attachments"
+
+    @property
     def sandbox_enabled(self) -> bool:
         """Whether Docker sandbox is enabled for task execution."""
         sandbox_config = self.settings.get("sandbox", {})

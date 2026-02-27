@@ -7,7 +7,8 @@ state, cancelling tasks, and PRD creation orchestration.
 import asyncio
 import json
 from datetime import datetime
-from typing import Awaitable, Callable, Dict, Optional
+from pathlib import Path
+from typing import Awaitable, Callable, Dict, List, Optional
 
 import structlog
 
@@ -79,7 +80,11 @@ class TaskManager:
         return f"Task in progress{elapsed}: {desc}\nUse /cancel to stop it."
 
     def start_background_task(
-        self, sender: str, task_description: str, project_name: Optional[str]
+        self,
+        sender: str,
+        task_description: str,
+        project_name: Optional[str],
+        image_paths: Optional[List[Path]] = None,
     ) -> None:
         """Start a Claude task in the background (non-blocking).
 
@@ -87,7 +92,20 @@ class TaskManager:
             sender: Phone number of the requesting user.
             task_description: The user's prompt/task text.
             project_name: Currently selected project name.
+            image_paths: Optional list of saved image file paths.
+                When provided, file paths are appended to the prompt
+                so Claude's agentic Read tool can view the images.
         """
+        # Build effective description with image paths appended
+        effective_description = task_description
+        if image_paths:
+            paths_text = "\n".join(str(p) for p in image_paths)
+            effective_description = (
+                f"{task_description}\n\n"
+                f"The user also sent {len(image_paths)} image(s). "
+                f"Use the Read tool to view them:\n{paths_text}"
+            )
+
         task_state = {
             "description": task_description,
             "start": datetime.now(),
@@ -110,7 +128,7 @@ class TaskManager:
                 task_state["step"] = "Claude executing task..."
                 task_project_path = self.project_manager.get_current_path(sender)
                 success, response = await self.runner.run_claude(
-                    task_description,
+                    effective_description,
                     progress_callback=progress_cb,
                     memory_context=memory_context,
                     project_path=task_project_path,
@@ -174,6 +192,26 @@ class TaskManager:
 
         logger.info("task_cancelled_by_user", task=task_desc[:50], sender=sender)
         return f"Cancelled{elapsed}: {task_desc[:100]}"
+
+    async def cancel_all_tasks(self) -> None:
+        """Cancel all pending background tasks during shutdown.
+
+        Cancels every active sender task and waits for them to finish.
+        Used by bot.stop() to drain tasks before closing the HTTP
+        session. Port of upstream SIGTERM shutdown fix (14b6a67).
+        """
+        for sender, task_state in list(self._sender_tasks.items()):
+            task = task_state.get("task")
+            if task and not task.done():
+                task.cancel()
+        pending = [
+            s["task"]
+            for s in self._sender_tasks.values()
+            if s.get("task") and not s["task"].done()
+        ]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._sender_tasks.clear()
 
     def start_prd_creation_task(self, sender: str, task_description: str) -> None:
         """Start PRD creation in the background (non-blocking)."""

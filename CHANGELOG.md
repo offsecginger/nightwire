@@ -5,6 +5,27 @@ All notable changes to nightwire (formerly sidechannel) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-02-27
+
+### Added — Milestone 8: Upstream Feature Port
+- **Image attachment processing** — Signal image attachments (JPEG, PNG, GIF, WebP) are downloaded, saved per-sender, and passed to Claude's agentic Read tool for multimodal analysis. Image-only messages default to "Describe this image."
+- **Docker sandbox hardening** — `Dockerfile.sandbox` for Claude CLI container with non-root user, no-new-privileges, cap-drop ALL, PID limits, memory/CPU limits, and network isolation
+- **Sandbox integration in Claude runner** — `_maybe_sandbox()` wraps CLI commands in Docker when `sandbox.enabled: true`, with `asyncio.to_thread()` for blocking Docker validation
+- **Installer sandbox setup** — `install.sh` offers optional sandbox image build with idempotent settings.yaml config and build failure logging
+- **`CONTRIBUTORS.md`** — Acknowledgment of community contributions from upstream
+
+### Fixed — Milestone 8: Upstream Bug Fixes
+- **Shutdown crash fix** — Reordered `bot.stop()` to cancel runner + background tasks BEFORE closing HTTP session (prevents use-after-close crashes on SIGTERM)
+- **`cancel_all_tasks()`** — New TaskManager method drains all background tasks during shutdown
+- **Attachment ID regex** — Allow dots in Signal attachment IDs (e.g., `09GIqaSf01wyBX0zokr7.jpg`) with path traversal prevention
+- **Sandbox PermissionError** — `validate_docker_available()` handles PermissionError, FileNotFoundError, and TimeoutExpired gracefully
+- **Sandbox hardening flags** — `--user 1000:1000`, `--security-opt no-new-privileges`, `--cap-drop ALL`, `--pids-limit 256`
+
+### Changed
+- `config.py`: Added `attachments_dir` property (default: `data/attachments/`)
+- `sandbox.py`: Default image changed from `python:3.11-slim` to `nightwire-sandbox:latest`
+- `SECURITY.md`: Added Docker sandbox hardening section
+
 ## [3.1.0] - 2026-02-27
 
 ### Changed — Milestone 7: CLI Runner Migration
