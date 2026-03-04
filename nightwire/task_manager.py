@@ -8,7 +8,7 @@ import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 import structlog
 
@@ -59,7 +59,7 @@ class TaskManager:
         self.config = config
         self._send_message = send_message
         self._get_memory_context = get_memory_context
-        self._sender_tasks: Dict[str, dict] = {}
+        self._sender_tasks: Dict[Tuple[str, str], dict] = {}
         # Per-user+project session IDs for Claude CLI --resume.
         # Keys are "sender:project_name", values are CLI session_id.
         # Ephemeral — lost on bot restart.
@@ -67,13 +67,13 @@ class TaskManager:
         # Set after start() — deferred initialization
         self.autonomous_manager = None
 
-    def get_task_state(self, sender: str) -> Optional[dict]:
+    def get_task_state(self, sender: str, project_name: Optional[str] = None) -> Optional[dict]:
         """Get the current task state for a sender, or None."""
-        return self._sender_tasks.get(sender)
+        return self._sender_tasks.get((sender, project_name or ""))
 
-    def check_busy(self, sender: str) -> Optional[str]:
+    def check_busy(self, sender: str, project_name: Optional[str] = None) -> Optional[str]:
         """Return a busy message if a task is running for this sender, else None."""
-        task_state = self._sender_tasks.get(sender)
+        task_state = self._sender_tasks.get((sender, project_name or ""))
         if not task_state or not task_state.get("task") or task_state["task"].done():
             return None
         elapsed = ""
@@ -114,9 +114,10 @@ class TaskManager:
             "description": task_description,
             "start": datetime.now(),
             "step": "Preparing context...",
+            "cancel_reason": None,
             "task": None,
         }
-        self._sender_tasks[sender] = task_state
+        self._sender_tasks[(sender, project_name or "")] = task_state
 
         async def run_task():
             try:
@@ -178,29 +179,46 @@ class TaskManager:
                     await self._send_message(sender, response)
 
             except asyncio.CancelledError:
-                await self._send_message(sender, "Task cancelled.")
-                logger.info("background_task_cancelled", task=task_description[:50])
+                reason = task_state.get("cancel_reason", "user cancel")
+                elapsed = ""
+                if task_state.get("start"):
+                    mins = int(
+                        (datetime.now() - task_state["start"]).total_seconds() / 60
+                    )
+                    elapsed = f" after {mins}m"
+                proj_label = f"[{project_name}] " if project_name else ""
+                msg = (
+                    f"{proj_label}Task cancelled{elapsed}: {reason}\n"
+                    f"Task was: {task_description[:100]}"
+                )
+                await self._send_message(sender, msg)
+                logger.info(
+                    "background_task_cancelled",
+                    task=task_description[:50],
+                    reason=reason,
+                )
             except Exception as e:
                 logger.error(
                     "background_task_error", error=str(e), exc_type=type(e).__name__
                 )
                 await self._send_message(sender, "Task failed due to an internal error.")
             finally:
-                self._sender_tasks.pop(sender, None)
+                self._sender_tasks.pop((sender, project_name or ""), None)
 
         task_state["task"] = asyncio.create_task(run_task())
         logger.info("background_task_started", task=task_description[:50], sender=sender)
 
-    async def cancel_current_task(self, sender: str) -> str:
+    async def cancel_current_task(self, sender: str, project_name: Optional[str] = None) -> str:
         """Cancel the currently running task for this sender.
 
         Args:
             sender: Phone number of the requesting user.
+            project_name: Currently selected project name.
 
         Returns:
             User-facing status message.
         """
-        task_state = self._sender_tasks.get(sender)
+        task_state = self._sender_tasks.get((sender, project_name or ""))
         if not task_state or not task_state.get("task") or task_state["task"].done():
             return "No task is currently running."
 
@@ -212,22 +230,28 @@ class TaskManager:
             )
             elapsed = f" after {mins}m"
 
+        task_state["cancel_reason"] = "user cancel"
         task_state["task"].cancel()
         await self.runner.cancel()
 
         logger.info("task_cancelled_by_user", task=task_desc[:50], sender=sender)
         return f"Cancelled{elapsed}: {task_desc[:100]}"
 
-    async def cancel_all_tasks(self) -> None:
+    async def cancel_all_tasks(self, reason: str = "service shutting down") -> None:
         """Cancel all pending background tasks during shutdown.
 
-        Cancels every active sender task and waits for them to finish.
+        Sets cancel_reason on each task before cancelling so the
+        CancelledError handler can notify the user with context.
         Used by bot.stop() to drain tasks before closing the HTTP
-        session. Port of upstream SIGTERM shutdown fix (14b6a67).
+        session.
+
+        Args:
+            reason: Reason string stored on each task's cancel_reason.
         """
-        for sender, task_state in list(self._sender_tasks.items()):
+        for key, task_state in list(self._sender_tasks.items()):
             task = task_state.get("task")
             if task and not task.done():
+                task_state["cancel_reason"] = reason
                 task.cancel()
         pending = [
             s["task"]
@@ -238,7 +262,81 @@ class TaskManager:
             await asyncio.gather(*pending, return_exceptions=True)
         self._sender_tasks.clear()
 
-    def start_prd_creation_task(self, sender: str, task_description: str) -> None:
+    def save_interrupted_tasks(self, data_dir: Path) -> None:
+        """Persist in-flight tasks to JSON so users can be notified on restart.
+
+        Args:
+            data_dir: Directory to write interrupted_tasks.json into.
+        """
+        active = []
+        for (sender, proj), state in self._sender_tasks.items():
+            task = state.get("task")
+            if task and not task.done():
+                active.append({
+                    "sender": sender,
+                    "project": proj,
+                    "description": state.get("description", ""),
+                    "step": state.get("step", ""),
+                })
+        if not active:
+            return
+        data_dir.mkdir(parents=True, exist_ok=True)
+        target = data_dir / "interrupted_tasks.json"
+        import tempfile
+        fd, tmp = tempfile.mkstemp(
+            suffix=".json", dir=str(data_dir),
+        )
+        try:
+            import os
+            with os.fdopen(fd, "w") as f:
+                json.dump(active, f)
+            os.replace(tmp, str(target))
+            logger.info("interrupted_tasks_saved", count=len(active))
+        except Exception as e:
+            logger.warning("interrupted_tasks_save_failed", error=str(e))
+
+    async def notify_interrupted_tasks(self, data_dir: Path) -> None:
+        """Read interrupted_tasks.json and notify users on startup.
+
+        Args:
+            data_dir: Directory containing interrupted_tasks.json.
+        """
+        target = data_dir / "interrupted_tasks.json"
+        if not target.exists():
+            return
+        try:
+            tasks = json.loads(target.read_text())
+            for t in tasks:
+                sender = t.get("sender", "")
+                proj = t.get("project", "")
+                desc = t.get("description", "unknown")
+                step = t.get("step", "")
+                proj_label = f"[{proj}] " if proj else ""
+                msg = (
+                    f"{proj_label}Service was restarted while a task was running.\n"
+                    f"Interrupted task: {desc[:100]}\n"
+                    f"Last step: {step[:100]}\n"
+                    "You may need to re-run this task."
+                )
+                await self._send_message(sender, msg)
+            target.unlink(missing_ok=True)
+            logger.info("interrupted_tasks_notified", count=len(tasks))
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning("interrupted_tasks_read_failed", error=str(e))
+            target.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning("interrupted_tasks_notify_error", error=str(e))
+
+    def get_all_tasks_for_sender(self, sender: str) -> Dict[str, dict]:
+        """Get all active tasks for a sender, keyed by project_name."""
+        return {
+            proj: state for (s, proj), state in self._sender_tasks.items()
+            if s == sender and state.get("task") and not state["task"].done()
+        }
+
+    def start_prd_creation_task(
+        self, sender: str, task_description: str, project_name: Optional[str] = None,
+    ) -> None:
         """Start PRD creation in the background (non-blocking)."""
         task_state = {
             "description": f"Creating PRD: {task_description[:50]}...",
@@ -246,7 +344,7 @@ class TaskManager:
             "step": "Initializing...",
             "task": None,
         }
-        self._sender_tasks[sender] = task_state
+        self._sender_tasks[(sender, project_name or "")] = task_state
 
         async def run_prd_creation():
             try:
@@ -263,7 +361,7 @@ class TaskManager:
                     sender, "PRD creation failed. Check logs for details."
                 )
             finally:
-                self._sender_tasks.pop(sender, None)
+                self._sender_tasks.pop((sender, project_name or ""), None)
 
         task_state["task"] = asyncio.create_task(run_prd_creation())
         logger.info("prd_creation_started", task=task_description[:50], sender=sender)
@@ -291,7 +389,7 @@ class TaskManager:
         project_path = self.project_manager.get_current_path(sender)
 
         async def update_step(step: str, notify: bool = True):
-            task_state = self._sender_tasks.get(sender)
+            task_state = self._sender_tasks.get((sender, project_name or ""))
             if task_state:
                 task_state["step"] = step
             if notify:

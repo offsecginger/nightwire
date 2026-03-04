@@ -49,11 +49,8 @@ logger = structlog.get_logger("nightwire.claude")
 PROGRESS_UPDATE_INTERVAL = 300
 
 # Retry configuration
-MAX_RETRIES = 2
+MAX_RETRIES = 1
 RETRY_BASE_DELAY = 5  # seconds
-
-# Signal message character limit (truncate output beyond this)
-MAX_SIGNAL_LENGTH = 4000
 
 # Streaming batch configuration
 STREAM_SEND_INTERVAL = 2.0  # seconds between batched sends
@@ -132,11 +129,14 @@ def classify_error(
         or "502" in combined
     ):
         return ErrorCategory.TRANSIENT
+    # Kill signals (SIGKILL, SIGTERM) indicate the process was terminated —
+    # retrying will not help
     if return_code in (-9, -15, 137, 143):
-        return ErrorCategory.TRANSIENT
+        return ErrorCategory.PERMANENT
 
+    # Non-zero exit with no error details — nothing to retry
     if return_code != 0 and not error_text.strip():
-        return ErrorCategory.TRANSIENT
+        return ErrorCategory.PERMANENT
 
     return ErrorCategory.PERMANENT
 
@@ -193,6 +193,8 @@ class ClaudeRunner:
             self.config.claude_path, "-p",
             "--output-format", output_format,
             "--model", self.config.claude_model,
+            # Disable Claude Code sandbox to allow sudo/systemctl in tasks
+            "--settings", '{"sandbox": {"enabled": false}}',
         ]
         if verbose:
             cmd.append("--verbose")
@@ -716,13 +718,6 @@ class ClaudeRunner:
 
             result = response.get("result", "")
 
-            # Truncate for Signal message display limits
-            if len(result) > MAX_SIGNAL_LENGTH:
-                result = (
-                    result[:MAX_SIGNAL_LENGTH]
-                    + "\n\n[Response truncated...]"
-                )
-
             # Stash full response for structured output parsing
             inv_state._last_response = response
 
@@ -1006,12 +1001,6 @@ class ClaudeRunner:
 
             # Stash full response for session_id extraction
             inv_state._last_response = final_response
-
-            if len(result_text) > MAX_SIGNAL_LENGTH:
-                result_text = (
-                    result_text[:MAX_SIGNAL_LENGTH]
-                    + "\n\n[Response truncated...]"
-                )
 
             return True, result_text, None
 

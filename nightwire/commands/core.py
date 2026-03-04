@@ -234,10 +234,11 @@ class CoreCommandHandler(BaseCommandHandler):
         Returns:
             Multi-section status string with project, task, loop, and cooldown info.
         """
+        project_name = self.ctx.project_manager.get_current_project(sender)
         status = self.ctx.project_manager.get_status(sender)
 
-        # Add running task info
-        task_state = self.ctx.task_manager.get_task_state(sender)
+        # Add running task info for current project
+        task_state = self.ctx.task_manager.get_task_state(sender, project_name)
         if task_state and task_state.get("task") and not task_state["task"].done():
             elapsed = ""
             if task_state.get("start"):
@@ -249,6 +250,25 @@ class CoreCommandHandler(BaseCommandHandler):
             status += f"\n\nActive Task{elapsed}: {desc}"
             if task_state.get("step"):
                 status += f"\nStep: {task_state['step']}"
+
+        # Show tasks running on other projects
+        all_tasks = self.ctx.task_manager.get_all_tasks_for_sender(sender)
+        other_tasks = {
+            proj: state for proj, state in all_tasks.items()
+            if proj != (project_name or "")
+        }
+        if other_tasks:
+            status += "\n\nOther Active Tasks:"
+            for proj, state in other_tasks.items():
+                proj_label = proj if proj else "(no project)"
+                desc = state.get("description", "unknown")[:80]
+                elapsed = ""
+                if state.get("start"):
+                    mins = int(
+                        (datetime.now() - state["start"]).total_seconds() / 60
+                    )
+                    elapsed = f" ({mins}m)"
+                status += f"\n  [{proj_label}]{elapsed}: {desc}"
 
         # Add autonomous loop status
         try:
@@ -400,7 +420,7 @@ class CoreCommandHandler(BaseCommandHandler):
         current_project = self.ctx.project_manager.get_current_project(sender)
         if not current_project:
             return "No project selected. Use /select <project> first."
-        busy = self.ctx.task_manager.check_busy(sender)
+        busy = self.ctx.task_manager.check_busy(sender, current_project)
         if busy:
             return busy
 
@@ -443,7 +463,7 @@ class CoreCommandHandler(BaseCommandHandler):
         current_project = self.ctx.project_manager.get_current_project(sender)
         if not current_project:
             return "No project selected. Use /select <project> first."
-        busy = self.ctx.task_manager.check_busy(sender)
+        busy = self.ctx.task_manager.check_busy(sender, current_project)
         if busy:
             return busy
 
@@ -479,16 +499,17 @@ class CoreCommandHandler(BaseCommandHandler):
             )
         if self.ctx.cooldown_active:
             return self.ctx.cooldown_manager.get_state().user_message
-        if not self.ctx.project_manager.get_current_project(sender):
+        current_project = self.ctx.project_manager.get_current_project(sender)
+        if not current_project:
             return "No project selected. Use /select <project> first."
-        busy = self.ctx.task_manager.check_busy(sender)
+        busy = self.ctx.task_manager.check_busy(sender, current_project)
         if busy:
             return busy
 
         await self.ctx.send_message(
             sender, "Creating PRD and breaking into autonomous tasks..."
         )
-        self.ctx.task_manager.start_prd_creation_task(sender, args)
+        self.ctx.task_manager.start_prd_creation_task(sender, args, current_project)
         return None
 
     async def handle_cancel(self, sender: str, args: str) -> str:
@@ -505,7 +526,8 @@ class CoreCommandHandler(BaseCommandHandler):
         Returns:
             Confirmation that the task was cancelled, or a message if no task is running.
         """
-        return await self.ctx.task_manager.cancel_current_task(sender)
+        project_name = self.ctx.project_manager.get_current_project(sender)
+        return await self.ctx.task_manager.cancel_current_task(sender, project_name)
 
     async def handle_summary(self, sender: str, args: str) -> Optional[str]:
         """Generate a comprehensive summary of the current project.
@@ -527,7 +549,7 @@ class CoreCommandHandler(BaseCommandHandler):
         current_project = self.ctx.project_manager.get_current_project(sender)
         if not current_project:
             return "No project selected. Use /select <project> first."
-        busy = self.ctx.task_manager.check_busy(sender)
+        busy = self.ctx.task_manager.check_busy(sender, current_project)
         if busy:
             return busy
 

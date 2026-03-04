@@ -7,6 +7,7 @@ command-line safety, and phone number masking for log privacy.
 
 import asyncio
 import functools
+import inspect
 import re
 import time
 from collections import defaultdict
@@ -183,7 +184,7 @@ def require_valid_project_path(func):
             raise ValueError("Path validation failed: access denied")
         return await func(*args, **kwargs)
 
-    if asyncio.iscoroutinefunction(func):
+    if inspect.iscoroutinefunction(func):
         return async_wrapper
     return sync_wrapper
 

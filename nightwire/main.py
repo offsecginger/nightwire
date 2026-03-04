@@ -26,7 +26,8 @@ async def main():
     setup_logging()
     logger = structlog.get_logger("nightwire")
 
-    logger.info("nightwire_starting", version="1.5.0")
+    from nightwire import __version__
+    logger.info("nightwire_starting", version=__version__)
 
     # Import here to ensure logging is configured first
     from .bot import SignalBot

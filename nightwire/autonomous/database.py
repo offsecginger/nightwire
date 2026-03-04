@@ -481,7 +481,7 @@ class AutonomousDatabase:
         """
         params: list = []
 
-        if prd_id:
+        if prd_id is not None:
             query += " AND s.prd_id = ?"
             params.append(prd_id)
 
@@ -804,7 +804,7 @@ class AutonomousDatabase:
         query = "SELECT * FROM tasks WHERE 1=1"
         params: list = []
 
-        if story_id:
+        if story_id is not None:
             query += " AND story_id = ?"
             params.append(story_id)
 
@@ -941,6 +941,30 @@ class AutonomousDatabase:
                 WHERE id = ?
             """,
                 (status.value, error_message, task_id),
+            )
+        elif status == TaskStatus.COMPLETED:
+            # Clear stale error_message on successful completion
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET status = ?,
+                    started_at = COALESCE(?, started_at),
+                    completed_at = COALESCE(?, completed_at),
+                    error_message = NULL,
+                    claude_output = COALESCE(?, claude_output),
+                    files_changed = COALESCE(?, files_changed),
+                    quality_gate_results = COALESCE(?, quality_gate_results)
+                WHERE id = ?
+            """,
+                (
+                    status.value,
+                    self._format_timestamp(started_at),
+                    self._format_timestamp(completed_at),
+                    claude_output,
+                    files_json,
+                    qg_json,
+                    task_id,
+                ),
             )
         else:
             cursor.execute(

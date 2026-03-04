@@ -69,7 +69,7 @@ class NightwireRunner:
         "Response Style:\n"
         "- Clear and organized\n"
         "- Use bullet points for lists\n"
-        "- Keep responses under 4000 characters\n"
+        "- Be thorough but concise\n"
         "- No emojis unless specifically requested"
     )
 
@@ -97,6 +97,7 @@ class NightwireRunner:
         self.model = model
         self.max_tokens = max_tokens
         self._session: Optional[aiohttp.ClientSession] = None
+        self._session_lock = asyncio.Lock()
 
         # Validate API URL scheme and hostname
         parsed = urlparse(self.api_url)
@@ -112,10 +113,11 @@ class NightwireRunner:
             logger.warning("nightwire_api_key_not_found")
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create a shared aiohttp session."""
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
+        """Get or create a shared aiohttp session (thread-safe)."""
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession()
+            return self._session
 
     async def close(self):
         """Close the shared HTTP session."""
@@ -278,12 +280,7 @@ class NightwireRunner:
         if not success:
             return False, result  # result is an error string
 
-        # result is an AssistantResponse — extract text content
-        content = result.content
-        if len(content) > 4000:
-            content = content[:4000] + "\n\n[Response truncated...]"
-
-        return True, content
+        return True, result.content
 
     # Deprecated alias — use ask() instead
     ask_jarvis = ask
@@ -311,14 +308,6 @@ class NightwireRunner:
         success, result = await self._make_request(payload, timeout)
         if not success:
             return False, result
-
-        # Truncate content for Signal display limits
-        if len(result.content) > 4000:
-            result = AssistantResponse(
-                content=result.content[:4000] + "\n\n[Response truncated...]",
-                tokens_used=result.tokens_used,
-                model=result.model,
-            )
 
         return True, result
 

@@ -91,7 +91,15 @@ async def check_signal_api(signal_api_url: str) -> DiagResult:
                     data = await resp.json()
                     versions = data.get("versions", [])
                     ver = versions[0] if versions else "unknown"
-                    return True, f"Signal API v{ver}", ""
+                    mode = data.get("mode", "unknown")
+                    detail = f"Signal API v{ver} (mode: {mode})"
+                    hint = ""
+                    if mode != "json-rpc":
+                        hint = (
+                            "Signal API mode is not json-rpc. "
+                            "Set MODE=json-rpc in docker-compose.yml"
+                        )
+                    return True, detail, hint
                 return (
                     False,
                     f"Signal API returned {resp.status}",

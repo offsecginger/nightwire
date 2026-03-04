@@ -43,7 +43,8 @@ class ContextBuilder:
         explicit_memories: Optional[List[ExplicitMemory]] = None,
         relevant_history: Optional[List[SearchResult]] = None,
         summarized_context: Optional[str] = None,
-        current_project: Optional[str] = None
+        current_project: Optional[str] = None,
+        command_history: Optional[list] = None,
     ) -> str:
         """Build a context section to prepend to prompts.
 
@@ -53,12 +54,21 @@ class ContextBuilder:
             relevant_history: Relevant past conversations
             summarized_context: Pre-summarized context (from Haiku)
             current_project: Current project name for filtering
+            command_history: Recent /do command history dicts with
+                ``role``, ``content``, ``command_type`` keys.
 
         Returns:
             Formatted context string, or empty string if no context
         """
         sections = []
         remaining_chars = self.max_chars
+
+        # Add recent command history (conversational continuity)
+        if command_history:
+            hist_section = self._format_command_history(command_history)
+            if hist_section and len(hist_section) < remaining_chars:
+                sections.append(hist_section)
+                remaining_chars -= len(hist_section)
 
         # Add preferences section
         if preferences:
@@ -100,6 +110,32 @@ class ContextBuilder:
         logger.debug("context_budget", max_tokens=self.max_tokens, used_tokens=used_tokens)
 
         return context
+
+    def _format_command_history(self, history: list) -> str:
+        """Format recent /do command history as a conversation thread.
+
+        Args:
+            history: List of dicts with role, content keys.
+
+        Returns:
+            Formatted conversation thread string.
+        """
+        if not history:
+            return ""
+        lines = ["## Recent /do History"]
+        for entry in history:
+            role = entry.get("role", "user")
+            content = entry.get("content", "")
+            # Strip /do prefix from user messages
+            if role == "user" and content.startswith("/do "):
+                content = content[4:]
+            # Truncate for budget
+            max_len = 500 if role == "assistant" else 300
+            if len(content) > max_len:
+                content = content[:max_len] + "..."
+            label = "User" if role == "user" else "Assistant"
+            lines.append(f"**{label}**: {content}")
+        return "\n".join(lines)
 
     def _format_preferences(self, preferences: List[Preference]) -> str:
         """Format preferences grouped by category.

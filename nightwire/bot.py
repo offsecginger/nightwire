@@ -106,6 +106,8 @@ class SignalBot:
         self.account: Optional[str] = None
         self._processed_messages = OrderedDict()  # Dedup: msg_hash -> timestamp
         self._attachment_cleanup_task: Optional[asyncio.Task] = None
+        self._ws_frames_received: int = 0
+        self._startup_notified: bool = False
 
         # Memory system
         memory_db_path = Path(self.config.config_dir).parent / "data" / "memory.db"
@@ -216,6 +218,7 @@ class SignalBot:
             progress_callback=autonomous_notify,
             poll_interval=self.config.autonomous_poll_interval,
             run_quality_gates=self.config.autonomous_quality_gates,
+            max_parallel=self.config.autonomous_max_parallel,
         )
         self.autonomous_commands = AutonomousCommands(
             manager=self.autonomous_manager,
@@ -235,6 +238,7 @@ class SignalBot:
                 send_message=self._send_message,
             )
             await self.updater.start()
+            self.set_shutdown_callback()
 
         # Initialize rate-limit cooldown manager
         self.cooldown_manager = get_cooldown_manager()
@@ -311,15 +315,27 @@ class SignalBot:
         except Exception as exc:
             logger.warning("startup_diagnostics_error", error=str(exc))
 
+        # Notify users about tasks interrupted by previous shutdown
+        data_dir = Path(self.config.config_dir).parent / "data"
+        await self.task_manager.notify_interrupted_tasks(data_dir)
+
         logger.info("bot_started", account=self.account)
+
+    SHUTDOWN_GRACE_SECONDS = 90
+
+    def set_shutdown_callback(self):
+        """Wire this bot's stop() as the updater's shutdown callback."""
+        if self.updater:
+            self.updater._shutdown_callback = lambda: asyncio.create_task(
+                self.stop()
+            )
 
     async def stop(self):
         """Stop the bot and clean up all resources.
 
-        Shutdown order: stop subsystems, cancel Claude processes and
-        background tasks, THEN close HTTP session and database.
-        This prevents use-after-close crashes when background tasks
-        try to send final messages during shutdown.
+        Graceful shutdown: waits up to SHUTDOWN_GRACE_SECONDS for
+        in-flight tasks to complete before force-killing. Persists
+        interrupted tasks for restart notification.
         """
         if not self.running:
             return
@@ -339,10 +355,31 @@ class SignalBot:
                 await self._attachment_cleanup_task
             except asyncio.CancelledError:
                 pass
-        # Cancel active Claude processes and background tasks BEFORE
-        # closing session — tasks may need the session for final messages
+        # Cancel active Claude processes
         await self.runner.cancel()
-        await self.task_manager.cancel_all_tasks()
+        # Graceful shutdown: wait for in-flight tasks to finish naturally
+        pending = [
+            s["task"]
+            for s in self.task_manager._sender_tasks.values()
+            if s.get("task") and not s["task"].done()
+        ]
+        if pending:
+            logger.info("shutdown_grace_period",
+                        tasks=len(pending),
+                        timeout=self.SHUTDOWN_GRACE_SECONDS)
+            done, still_running = await asyncio.wait(
+                pending, timeout=self.SHUTDOWN_GRACE_SECONDS,
+            )
+            if still_running:
+                logger.warning("shutdown_force_kill",
+                               tasks=len(still_running))
+        # Save interrupted tasks BEFORE force-cancelling
+        data_dir = Path(self.config.config_dir).parent / "data"
+        self.task_manager.save_interrupted_tasks(data_dir)
+        # Force-cancel any remaining tasks
+        await self.task_manager.cancel_all_tasks(
+            reason="service shutting down",
+        )
         # Now safe to close network and database resources
         if self.session:
             await self.session.close()
@@ -391,7 +428,11 @@ class SignalBot:
                             logger.warning("no_accounts_registered")
                             return
                     else:
-                        logger.warning("account_request_failed", status=resp.status)
+                        logger.warning("account_request_failed",
+                                        status=resp.status, attempt=attempt)
+                        if attempt < max_attempts:
+                            delay = min(base_delay * attempt, max_delay)
+                            await asyncio.sleep(delay)
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 delay = min(base_delay * attempt, max_delay)
                 logger.warning(
@@ -403,26 +444,72 @@ class SignalBot:
 
         logger.error("account_request_failed_all_attempts", attempts=max_attempts)
 
+    @staticmethod
+    def _split_message(text: str, max_len: int = 5000) -> list:
+        """Split long messages at paragraph/line boundaries.
+
+        Args:
+            text: Message text to split.
+            max_len: Maximum characters per part.
+
+        Returns:
+            List of message parts, each within max_len.
+        """
+        if len(text) <= max_len:
+            return [text]
+        parts = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= max_len:
+                parts.append(remaining)
+                break
+            # Try to split at paragraph boundary
+            split_at = remaining.rfind("\n\n", 0, max_len)
+            if split_at < max_len // 2:
+                # Try single newline
+                split_at = remaining.rfind("\n", 0, max_len)
+            if split_at < max_len // 2:
+                # Hard split at max_len
+                split_at = max_len
+            parts.append(remaining[:split_at])
+            remaining = remaining[split_at:].lstrip("\n")
+        return parts
+
     async def _send_message(self, recipient: str, message: str):
-        """Send a message via Signal API."""
+        """Send a message via Signal API, splitting long messages.
+
+        Messages are prefixed with ``[instance_name]`` and split at
+        paragraph/line boundaries if they exceed 5000 characters.
+        """
+        if not self.account:
+            logger.warning("send_no_account", msg="Cannot send — no Signal account registered")
+            return
         if not is_authorized(recipient):
             logger.warning("send_blocked_unauthorized", recipient="..." + recipient[-4:])
             return
 
-        message = f"[nightwire] {message}"
-        payload = {
-            "message": message,
-            "number": self.account,
-            "recipients": [recipient],
-        }
-        try:
-            url = f"{self.config.signal_api_url}/v2/send"
-            async with self.session.post(url, json=payload) as resp:
-                if resp.status != 201:
-                    body = await resp.text()
-                    logger.warning("send_failed", status=resp.status, body=body[:200])
-        except Exception as e:
-            logger.error("send_error", error=str(e))
+        prefix = f"[{self.config.instance_name}]"
+        parts = self._split_message(message)
+        total = len(parts)
+        for i, part in enumerate(parts):
+            if total > 1:
+                label = f"{prefix} [{i + 1}/{total}] "
+            else:
+                label = f"{prefix} "
+            payload = {
+                "message": label + part,
+                "number": self.account,
+                "recipients": [recipient],
+            }
+            try:
+                url = f"{self.config.signal_api_url}/v2/send"
+                async with self.session.post(url, json=payload) as resp:
+                    if resp.status != 201:
+                        body = await resp.text()
+                        logger.warning("send_failed", status=resp.status,
+                                        body=body[:200])
+            except Exception as e:
+                logger.error("send_error", error=str(e))
 
     async def _handle_command(
         self, command: str, args: str, sender: str, image_paths=None
@@ -543,7 +630,7 @@ class SignalBot:
                 if self.cooldown_manager and self.cooldown_manager.is_active:
                     response = self.cooldown_manager.get_state().user_message
                 elif project_name:
-                    busy = self.task_manager.check_busy(sender)
+                    busy = self.task_manager.check_busy(sender, project_name)
                     if busy:
                         response = busy
                     else:
@@ -600,10 +687,38 @@ class SignalBot:
                 async with self.session.ws_connect(ws_url, heartbeat=30) as ws:
                     logger.info("websocket_connected")
                     reconnect_delay = 5
+                    # Startup notification — send once on first WS connect
+                    if not self._startup_notified:
+                        self._startup_notified = True
+                        from nightwire import __version__
+                        for phone in self.config.allowed_numbers:
+                            try:
+                                await self._send_message(
+                                    phone,
+                                    f"Nightwire v{__version__} started"
+                                    " and ready.",
+                                )
+                            except Exception:
+                                pass
+
                     async for msg in ws:
+                        self._ws_frames_received += 1
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             try:
                                 data = json.loads(msg.data)
+                                envelope = data.get("envelope", {})
+                                envelope_type = (
+                                    "dataMessage" if envelope.get("dataMessage")
+                                    else "syncMessage" if envelope.get("syncMessage")
+                                    else "receipt" if envelope.get("receiptMessage")
+                                    else "typing" if envelope.get("typingMessage")
+                                    else "other"
+                                )
+                                logger.debug(
+                                    "ws_envelope",
+                                    type=envelope_type,
+                                    frames=self._ws_frames_received,
+                                )
                                 await self._handle_signal_message(data)
                             except json.JSONDecodeError:
                                 logger.warning("invalid_json", data=msg.data[:100])
@@ -685,6 +800,12 @@ class SignalBot:
             if not source:
                 return
 
+            # Feedback loop prevention — ignore our own outgoing messages
+            # that arrive back via linked devices (dataMessage or syncMessage)
+            prefix = f"[{self.config.instance_name}]"
+            if message_text.strip().startswith(prefix):
+                return
+
             # Deduplication
             timestamp = envelope.get("timestamp", 0)
             msg_hash = hashlib.sha256(
@@ -710,11 +831,20 @@ class SignalBot:
                 source="..." + source[-4:], length=len(message_text),
                 images=len(image_paths) if image_paths else 0,
             )
-            await self._process_message(
-                source, message_text,
-                image_paths=image_paths if image_paths else None,
+            await asyncio.wait_for(
+                self._process_message(
+                    source, message_text,
+                    image_paths=image_paths if image_paths else None,
+                ),
+                timeout=120,
             )
 
+        except asyncio.TimeoutError:
+            logger.error(
+                "message_handler_timeout",
+                sender="..." + source[-4:] if source else "unknown",
+                elapsed=120,
+            )
         except Exception as e:
             logger.error(
                 "message_handling_error", error=str(e), msg=str(msg)[:200]

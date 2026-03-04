@@ -74,13 +74,17 @@ class DatabaseConnection:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
 
-        # Check for sqlite-vec extension
+        # Load sqlite-vec via the Python package API (works on all platforms
+        # including aarch64 where raw load_extension("vec0") fails)
         try:
-            self._conn.enable_load_extension(True)
-            self._conn.load_extension("vec0")
-            self._conn.enable_load_extension(False)
+            import sqlite_vec
+            sqlite_vec.load(self._conn)
             self._has_vec = True
             logger.info("sqlite_vec_loaded")
+        except ImportError:
+            logger.info("sqlite_vec_not_installed",
+                        hint="pip install sqlite-vec for semantic search")
+            self._has_vec = False
         except Exception as e:
             logger.warning("sqlite_vec_not_available", error=str(e))
             self._has_vec = False
@@ -406,6 +410,8 @@ class DatabaseConnection:
     def _parse_sqlite_timestamp(self, ts_str: Optional[str]) -> datetime:
         """Parse SQLite CURRENT_TIMESTAMP format."""
         if not ts_str:
+            logger.debug("timestamp_null_fallback",
+                         note="using datetime.now() for null timestamp")
             return datetime.now()
         try:
             # Try SQLite format first: 'YYYY-MM-DD HH:MM:SS'
@@ -421,7 +427,10 @@ class DatabaseConnection:
     async def close(self) -> None:
         """Close the database connection."""
         if self._conn:
-            await asyncio.to_thread(self._conn.close)
+            def _close_with_lock():
+                with self._lock:
+                    self._conn.close()
+            await asyncio.to_thread(_close_with_lock)
             self._conn = None
 
     # User operations
@@ -437,42 +446,44 @@ class DatabaseConnection:
         return await asyncio.to_thread(self._ensure_user_sync, phone_number)
 
     def _ensure_user_sync(self, phone_number: str) -> User:
-        cursor = self._conn.cursor()
-        cursor.execute(
-            "SELECT * FROM users WHERE phone_number = ?",
-            (phone_number,)
-        )
-        row = cursor.fetchone()
-
-        if row:
-            return User(
-                phone_number=row["phone_number"],
-                display_name=row["display_name"],
-                first_seen=self._parse_sqlite_timestamp(row["first_seen"]),
-                last_active=self._parse_sqlite_timestamp(row["last_active"]),
-                total_messages=row["total_messages"]
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT * FROM users WHERE phone_number = ?",
+                (phone_number,)
             )
+            row = cursor.fetchone()
 
-        # Create new user
-        cursor.execute(
-            "INSERT INTO users (phone_number) VALUES (?)",
-            (phone_number,)
-        )
-        self._conn.commit()
-        return User(phone_number=phone_number)
+            if row:
+                return User(
+                    phone_number=row["phone_number"],
+                    display_name=row["display_name"],
+                    first_seen=self._parse_sqlite_timestamp(row["first_seen"]),
+                    last_active=self._parse_sqlite_timestamp(row["last_active"]),
+                    total_messages=row["total_messages"]
+                )
+
+            # Create new user
+            cursor.execute(
+                "INSERT INTO users (phone_number) VALUES (?)",
+                (phone_number,)
+            )
+            self._conn.commit()
+            return User(phone_number=phone_number)
 
     async def update_user_activity(self, phone_number: str) -> None:
         """Update user's last activity and message count."""
         await asyncio.to_thread(self._update_user_activity_sync, phone_number)
 
     def _update_user_activity_sync(self, phone_number: str) -> None:
-        cursor = self._conn.cursor()
-        cursor.execute("""
-            UPDATE users
-            SET last_active = CURRENT_TIMESTAMP, total_messages = total_messages + 1
-            WHERE phone_number = ?
-        """, (phone_number,))
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("""
+                UPDATE users
+                SET last_active = CURRENT_TIMESTAMP, total_messages = total_messages + 1
+                WHERE phone_number = ?
+            """, (phone_number,))
+            self._conn.commit()
 
     # Session operations
     async def get_or_create_session(
@@ -507,51 +518,53 @@ class DatabaseConnection:
         project_name: Optional[str],
         timeout_minutes: int
     ) -> Session:
-        cursor = self._conn.cursor()
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)
+        with self._lock:
+            cursor = self._conn.cursor()
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_minutes)
 
-        # Find active session
-        cursor.execute("""
-            SELECT * FROM sessions
-            WHERE phone_number = ? AND ended_at IS NULL AND started_at > ?
-            ORDER BY started_at DESC LIMIT 1
-        """, (phone_number, self._format_sqlite_timestamp(cutoff)))
-        row = cursor.fetchone()
+            # Find active session
+            cursor.execute("""
+                SELECT * FROM sessions
+                WHERE phone_number = ? AND ended_at IS NULL AND started_at > ?
+                ORDER BY started_at DESC LIMIT 1
+            """, (phone_number, self._format_sqlite_timestamp(cutoff)))
+            row = cursor.fetchone()
 
-        if row:
+            if row:
+                return Session(
+                    id=row["id"],
+                    phone_number=row["phone_number"],
+                    started_at=self._parse_sqlite_timestamp(row["started_at"]),
+                    project_name=row["project_name"],
+                    message_count=row["message_count"]
+                )
+
+            # Create new session
+            session_id = str(uuid.uuid4())
+            cursor.execute("""
+                INSERT INTO sessions (id, phone_number, project_name)
+                VALUES (?, ?, ?)
+            """, (session_id, phone_number, project_name))
+            self._conn.commit()
+
             return Session(
-                id=row["id"],
-                phone_number=row["phone_number"],
-                started_at=self._parse_sqlite_timestamp(row["started_at"]),
-                project_name=row["project_name"],
-                message_count=row["message_count"]
+                id=session_id,
+                phone_number=phone_number,
+                project_name=project_name
             )
-
-        # Create new session
-        session_id = str(uuid.uuid4())
-        cursor.execute("""
-            INSERT INTO sessions (id, phone_number, project_name)
-            VALUES (?, ?, ?)
-        """, (session_id, phone_number, project_name))
-        self._conn.commit()
-
-        return Session(
-            id=session_id,
-            phone_number=phone_number,
-            project_name=project_name
-        )
 
     async def update_session_count(self, session_id: str) -> None:
         """Increment session message count."""
         await asyncio.to_thread(self._update_session_count_sync, session_id)
 
     def _update_session_count_sync(self, session_id: str) -> None:
-        cursor = self._conn.cursor()
-        cursor.execute(
-            "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
-            (session_id,)
-        )
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
+                (session_id,)
+            )
+            self._conn.commit()
 
     # Conversation operations
     async def store_conversation(
@@ -599,17 +612,21 @@ class DatabaseConnection:
         command_type: Optional[str],
         metadata: Optional[dict[str, Any]]
     ) -> int:
-        cursor = self._conn.cursor()
-        metadata_json = json.dumps(metadata) if metadata else None
+        with self._lock:
+            cursor = self._conn.cursor()
+            metadata_json = json.dumps(metadata) if metadata else None
 
-        cursor.execute("""
-            INSERT INTO conversations
-            (phone_number, session_id, role, content, project_name, command_type, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (phone_number, session_id, role, content, project_name, command_type, metadata_json))
-        self._conn.commit()
+            cursor.execute("""
+                INSERT INTO conversations
+                (phone_number, session_id, role, content, project_name, command_type, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                phone_number, session_id, role, content,
+                project_name, command_type, metadata_json,
+            ))
+            self._conn.commit()
 
-        return cursor.lastrowid
+            return cursor.lastrowid
 
     async def get_history(
         self,
@@ -717,21 +734,22 @@ class DatabaseConnection:
         source_conversation_id: Optional[int],
         confidence: float
     ) -> int:
-        cursor = self._conn.cursor()
+        with self._lock:
+            cursor = self._conn.cursor()
 
-        cursor.execute("""
-            INSERT INTO preferences
-            (phone_number, category, key, value, source_conversation_id, confidence)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(phone_number, category, key) DO UPDATE SET
-                value = excluded.value,
-                confidence = excluded.confidence,
-                last_used = CURRENT_TIMESTAMP,
-                use_count = use_count + 1
-        """, (phone_number, category, key, value, source_conversation_id, confidence))
-        self._conn.commit()
+            cursor.execute("""
+                INSERT INTO preferences
+                (phone_number, category, key, value, source_conversation_id, confidence)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(phone_number, category, key) DO UPDATE SET
+                    value = excluded.value,
+                    confidence = excluded.confidence,
+                    last_used = CURRENT_TIMESTAMP,
+                    use_count = use_count + 1
+            """, (phone_number, category, key, value, source_conversation_id, confidence))
+            self._conn.commit()
 
-        return cursor.lastrowid
+            return cursor.lastrowid
 
     async def get_preferences(
         self,
@@ -817,16 +835,17 @@ class DatabaseConnection:
         tags: Optional[List[str]],
         project_name: Optional[str]
     ) -> int:
-        cursor = self._conn.cursor()
-        tags_json = json.dumps(tags) if tags else None
+        with self._lock:
+            cursor = self._conn.cursor()
+            tags_json = json.dumps(tags) if tags else None
 
-        cursor.execute("""
-            INSERT INTO explicit_memories (phone_number, memory_text, tags, project_name)
-            VALUES (?, ?, ?, ?)
-        """, (phone_number, memory_text, tags_json, project_name))
-        self._conn.commit()
+            cursor.execute("""
+                INSERT INTO explicit_memories (phone_number, memory_text, tags, project_name)
+                VALUES (?, ?, ?, ?)
+            """, (phone_number, memory_text, tags_json, project_name))
+            self._conn.commit()
 
-        return cursor.lastrowid
+            return cursor.lastrowid
 
     async def get_memories(
         self,
@@ -894,46 +913,80 @@ class DatabaseConnection:
         return await asyncio.to_thread(self._delete_all_user_data_sync, phone_number)
 
     def _delete_all_user_data_sync(self, phone_number: str) -> int:
-        cursor = self._conn.cursor()
-        total = 0
+        with self._lock:
+            cursor = self._conn.cursor()
+            total = 0
 
-        cursor.execute("DELETE FROM conversations WHERE phone_number = ?", (phone_number,))
-        total += cursor.rowcount
+            # Delete orphaned embeddings BEFORE deleting conversations/memories
+            # (embeddings are referenced by embedding_id in both tables)
+            if self._has_vec:
+                cursor.execute("""
+                    DELETE FROM embeddings WHERE rowid IN (
+                        SELECT embedding_id FROM conversations
+                        WHERE phone_number = ? AND embedding_id IS NOT NULL
+                        UNION
+                        SELECT embedding_id FROM explicit_memories
+                        WHERE phone_number = ? AND embedding_id IS NOT NULL
+                    )
+                """, (phone_number, phone_number))
+                total += cursor.rowcount
 
-        cursor.execute("DELETE FROM preferences WHERE phone_number = ?", (phone_number,))
-        total += cursor.rowcount
+            cursor.execute(
+                "DELETE FROM conversations WHERE phone_number = ?", (phone_number,)
+            )
+            total += cursor.rowcount
 
-        cursor.execute("DELETE FROM explicit_memories WHERE phone_number = ?", (phone_number,))
-        total += cursor.rowcount
+            cursor.execute(
+                "DELETE FROM preferences WHERE phone_number = ?", (phone_number,)
+            )
+            total += cursor.rowcount
 
-        # Delete autonomous system data
-        cursor.execute("DELETE FROM learnings WHERE phone_number = ?", (phone_number,))
-        total += cursor.rowcount
-        cursor.execute("DELETE FROM tasks WHERE phone_number = ?", (phone_number,))
-        total += cursor.rowcount
-        cursor.execute("DELETE FROM stories WHERE phone_number = ?", (phone_number,))
-        total += cursor.rowcount
-        cursor.execute("DELETE FROM prds WHERE phone_number = ?", (phone_number,))
-        total += cursor.rowcount
+            cursor.execute(
+                "DELETE FROM explicit_memories WHERE phone_number = ?", (phone_number,)
+            )
+            total += cursor.rowcount
 
-        cursor.execute("DELETE FROM sessions WHERE phone_number = ?", (phone_number,))
-        total += cursor.rowcount
+            # Delete autonomous system data
+            cursor.execute(
+                "DELETE FROM learnings WHERE phone_number = ?", (phone_number,)
+            )
+            total += cursor.rowcount
+            cursor.execute(
+                "DELETE FROM tasks WHERE phone_number = ?", (phone_number,)
+            )
+            total += cursor.rowcount
+            cursor.execute(
+                "DELETE FROM stories WHERE phone_number = ?", (phone_number,)
+            )
+            total += cursor.rowcount
+            cursor.execute(
+                "DELETE FROM prds WHERE phone_number = ?", (phone_number,)
+            )
+            total += cursor.rowcount
 
-        cursor.execute("DELETE FROM users WHERE phone_number = ?", (phone_number,))
-        total += cursor.rowcount
+            cursor.execute(
+                "DELETE FROM sessions WHERE phone_number = ?", (phone_number,)
+            )
+            total += cursor.rowcount
 
-        self._conn.commit()
-        return total
+            cursor.execute(
+                "DELETE FROM users WHERE phone_number = ?", (phone_number,)
+            )
+            total += cursor.rowcount
+
+            self._conn.commit()
+            return total
 
     async def delete_preferences(self, phone_number: str) -> int:
         """Delete all preferences for a user."""
         return await asyncio.to_thread(self._delete_preferences_sync, phone_number)
 
     def _delete_preferences_sync(self, phone_number: str) -> int:
-        cursor = self._conn.cursor()
-        cursor.execute("DELETE FROM preferences WHERE phone_number = ?", (phone_number,))
-        self._conn.commit()
-        return cursor.rowcount
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("DELETE FROM preferences WHERE phone_number = ?", (phone_number,))
+            self._conn.commit()
+            return cursor.rowcount
 
     async def delete_today_conversations(self, phone_number: str) -> int:
         """Delete today's conversations for a user."""
@@ -970,13 +1023,14 @@ class DatabaseConnection:
         return await asyncio.to_thread(self._store_embedding_sync, embedding)
 
     def _store_embedding_sync(self, embedding: List[float]) -> int:
-        cursor = self._conn.cursor()
-        cursor.execute(
-            "INSERT INTO embeddings (embedding) VALUES (?)",
-            (json.dumps(embedding),)
-        )
-        self._conn.commit()
-        return cursor.lastrowid
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "INSERT INTO embeddings (embedding) VALUES (?)",
+                (json.dumps(embedding),)
+            )
+            self._conn.commit()
+            return cursor.lastrowid
 
     async def update_conversation_embedding(
         self,
@@ -995,12 +1049,13 @@ class DatabaseConnection:
         conversation_id: int,
         embedding_id: int
     ) -> None:
-        cursor = self._conn.cursor()
-        cursor.execute(
-            "UPDATE conversations SET embedding_id = ? WHERE id = ?",
-            (embedding_id, conversation_id)
-        )
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "UPDATE conversations SET embedding_id = ? WHERE id = ?",
+                (embedding_id, conversation_id)
+            )
+            self._conn.commit()
 
     async def search_by_embedding(
         self,

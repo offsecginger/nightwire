@@ -157,9 +157,11 @@ class TestAutoUpdater:
 
     @pytest.mark.asyncio
     async def test_apply_update_success(self):
-        """apply_update pulls, installs, and schedules restart."""
+        """apply_update pulls, installs, runs hooks, and triggers shutdown."""
         send = AsyncMock()
+        shutdown_cb = MagicMock()
         updater = self._make_updater(send_message=send)
+        updater._shutdown_callback = shutdown_cb
         updater.pending_update = True
         updater.pending_sha = "def5678"
 
@@ -169,14 +171,14 @@ class TestAutoUpdater:
             return ""
         updater._run_git = fake_run_git
 
-        with patch("nightwire.updater.subprocess.run") as mock_run, \
-             patch("nightwire.updater.asyncio.create_task") as mock_create_task:
+        with patch("nightwire.updater.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
             result = await updater.apply_update()
 
         assert "Update applied" in result
         assert updater.pending_update is False
-        mock_create_task.assert_called()  # _delayed_exit task was created
+        assert updater.update_applied is True
+        shutdown_cb.assert_called_once()  # graceful shutdown triggered
 
     @pytest.mark.asyncio
     async def test_apply_update_git_pull_fails_triggers_rollback(self):

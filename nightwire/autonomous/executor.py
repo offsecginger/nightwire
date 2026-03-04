@@ -48,8 +48,14 @@ from .quality_gates import QualityGateRunner
 
 logger = structlog.get_logger("nightwire.autonomous")
 
-# Lock to serialize git operations (prevents race conditions)
-_git_lock = asyncio.Lock()
+# Per-project locks to serialize git operations (prevents race conditions
+# within a project while allowing parallel operations across projects)
+_git_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_git_lock(project_path: str) -> asyncio.Lock:
+    """Get or create an asyncio.Lock for a specific project path."""
+    return _git_locks.setdefault(str(project_path), asyncio.Lock())
 
 # Max attempts for verification fix loop
 MAX_VERIFICATION_FIX_ATTEMPTS = 2
@@ -178,13 +184,13 @@ class TaskExecutor:
         """Create a git checkpoint before task execution.
 
         Commits any uncommitted changes so that Claude's work can be
-        isolated and rolled back if needed. Uses the global git lock
-        to prevent race conditions with parallel workers.
+        isolated and rolled back if needed. Uses a per-project git lock
+        to prevent race conditions with parallel workers on the same project.
 
         Returns True if checkpoint was created, False otherwise.
         """
         try:
-            async with _git_lock:
+            async with _get_git_lock(str(project_path)):
                 # Check if there are uncommitted changes
                 proc = await asyncio.create_subprocess_exec(
                     "git", "status", "--porcelain",
@@ -236,7 +242,7 @@ class TaskExecutor:
         Returns True if changes were committed.
         """
         try:
-            async with _git_lock:
+            async with _get_git_lock(str(project_path)):
                 proc = await asyncio.create_subprocess_exec(
                     "git", "status", "--porcelain",
                     cwd=str(project_path),
@@ -809,7 +815,7 @@ class TaskExecutor:
         """
         files = set()
         try:
-            async with _git_lock:
+            async with _get_git_lock(str(project_path)):
                 # Check uncommitted changes
                 proc = await asyncio.create_subprocess_exec(
                     "git", "diff", "--name-only", "HEAD",

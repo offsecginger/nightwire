@@ -3,7 +3,7 @@
 # nightwire installer
 # Signal + Claude AI Bot
 #
-# Usage: ./install.sh [--skip-signal] [--skip-systemd] [--uninstall] [--restart]
+# Usage: ./install.sh [--skip-signal] [--skip-systemd] [--no-prepackaged] [--uninstall] [--restart]
 #
 
 set -e
@@ -30,7 +30,7 @@ sed_inplace() {
 wait_for_qrcode() {
     local max_wait=${1:-90}
     local elapsed=0
-    local qr_url="http://127.0.0.1:8080/v1/qrcodelink?device_name=nightwire"
+    local qr_url="http://127.0.0.1:8080/v1/qrcodelink?device_name=${DEVICE_NAME:-nightwire}"
     QR_READY=false
 
     echo -ne "  Waiting for Signal bridge to initialize"
@@ -63,6 +63,298 @@ wait_for_qrcode() {
     return 1
 }
 
+# =============================================================================
+# Signal CLI patching for device linking (ACI binary fix)
+# =============================================================================
+# signal-cli <= 0.13.24 has a bug where device linking fails because Signal
+# changed their provisioning protocol to send ACI as binary bytes instead of
+# a string. See: https://github.com/AsamK/signal-cli/issues/1937
+#
+# This downloads signal-cli JVM edition, applies a pre-compiled patch, and
+# uses it for device linking. The Docker container handles messaging after.
+# =============================================================================
+
+SIGNAL_CLI_VERSION="0.13.24"
+
+# Downloads, patches, and persists signal-cli for device linking.
+# Delegates download/patching to scripts/apply-signal-patches.sh.
+# Sets: JAVA_CMD, SIGNAL_CLI_CMD, SIGNAL_CLI_LIB_DIR, JAVA_HOME
+# Returns 0 on success, 1 on failure.
+prepare_link_tool() {
+    local install_dir="$1"
+
+    echo -e "  ${BLUE}Preparing device link tool...${NC}"
+
+    # 1. Find or install Java 21+
+    JAVA_CMD=""
+    for java_path in \
+        /usr/lib/jvm/java-21-*/bin/java \
+        /usr/lib/jvm/java-*/bin/java \
+        /opt/homebrew/opt/openjdk@21/bin/java \
+        /opt/homebrew/opt/openjdk/bin/java; do
+        if [ -x "$java_path" ] 2>/dev/null; then
+            java_ver=$("$java_path" -version 2>&1 | head -1 | sed 's/.*"\([0-9]*\).*/\1/' | head -1)
+            if [ "${java_ver:-0}" -ge 21 ]; then
+                JAVA_CMD="$java_path"
+                break
+            fi
+        fi
+    done
+
+    # Try bare 'java' command
+    if [ -z "$JAVA_CMD" ] && command -v java &>/dev/null; then
+        java_ver=$(java -version 2>&1 | head -1 | sed 's/.*"\([0-9]*\).*/\1/' | head -1)
+        if [ "${java_ver:-0}" -ge 21 ]; then
+            JAVA_CMD="java"
+        fi
+    fi
+
+    if [ -z "$JAVA_CMD" ]; then
+        echo -ne "  Installing Java 21 runtime..."
+        if command -v apt-get &>/dev/null; then
+            sudo apt-get install -y -qq openjdk-21-jre-headless > /dev/null 2>&1
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y -q java-21-openjdk-headless > /dev/null 2>&1
+        elif command -v brew &>/dev/null; then
+            brew install --quiet openjdk@21 > /dev/null 2>&1
+        fi
+
+        for java_path in \
+            /usr/lib/jvm/java-21-*/bin/java \
+            /opt/homebrew/opt/openjdk@21/bin/java \
+            /opt/homebrew/opt/openjdk/bin/java; do
+            if [ -x "$java_path" ] 2>/dev/null; then
+                JAVA_CMD="$java_path"
+                break
+            fi
+        done
+
+        if [ -z "$JAVA_CMD" ]; then
+            echo -e " ${RED}failed${NC}"
+            echo -e "  ${RED}Java 21+ is required for device linking. Install manually and re-run.${NC}"
+            return 1
+        fi
+        echo -e " ${GREEN}done${NC}"
+    fi
+    echo -e "  ${GREEN}✓${NC} Java 21+"
+
+    # 2. Run the shared patch script to download & patch signal-cli
+    local patch_script="$install_dir/scripts/apply-signal-patches.sh"
+    if [ -x "$patch_script" ]; then
+        if ! bash "$patch_script" "$install_dir"; then
+            echo -e "  ${RED}Patch script failed${NC}"
+            return 1
+        fi
+    else
+        echo -e "  ${YELLOW}!${NC} Patch script not found at $patch_script"
+        return 1
+    fi
+
+    # Set up environment for signal-cli
+    JAVA_HOME=$(dirname "$(dirname "$JAVA_CMD")")
+    SIGNAL_CLI_CMD="$install_dir/signal-cli-${SIGNAL_CLI_VERSION}/bin/signal-cli"
+    SIGNAL_CLI_LIB_DIR="$install_dir/signal-cli-${SIGNAL_CLI_VERSION}/lib"
+
+    echo -e "  ${GREEN}✓${NC} Link tool ready"
+    return 0
+}
+
+# Runs device linking with QR code display and retry logic.
+# Args: $1=signal_data_dir $2=remote_mode(true/false) $3=device_name(default: nightwire)
+# Sets: LINKED_NUMBER on success
+# Returns 0 on success, 1 on failure.
+run_device_link() {
+    local config_dir="$1"
+    local remote_mode="$2"
+    local device_name="${3:-nightwire}"
+    local max_attempts=3
+    local attempt=0
+
+    # Install qrcode Python package for QR display
+    pip install -q qrcode 2>/dev/null || true
+
+    while [ $attempt -lt $max_attempts ]; do
+        attempt=$((attempt + 1))
+
+        if [ $attempt -gt 1 ]; then
+            echo ""
+            echo -e "  ${YELLOW}Retrying (attempt $attempt of $max_attempts)...${NC}"
+            echo -e "  Signal's provisioning window is 60 seconds — scan promptly."
+        fi
+
+        # Run signal-cli link in background, capture output
+        local link_log
+        link_log=$(mktemp)
+        JAVA_HOME="$JAVA_HOME" \
+            SIGNAL_CLI_OPTS="-Djava.library.path=$SIGNAL_CLI_LIB_DIR" \
+            "$SIGNAL_CLI_CMD" --config "$config_dir" link --name "$device_name" \
+            > "$link_log" 2>&1 &
+        LINK_PID=$!
+
+        # Wait for URI to appear in output (up to 20s)
+        local uri=""
+        local QR_SERVER_PID=""
+        for i in $(seq 1 20); do
+            uri=$(grep -o 'sgnl://[^ ]*' "$link_log" 2>/dev/null | head -1)
+            if [ -n "$uri" ]; then
+                break
+            fi
+            if ! kill -0 $LINK_PID 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+
+        if [ -z "$uri" ]; then
+            echo -e "  ${YELLOW}Failed to generate link URI.${NC}"
+            kill $LINK_PID 2>/dev/null
+            wait $LINK_PID 2>/dev/null || true
+            grep -i "error\|exception\|fail" "$link_log" 2>/dev/null | tail -3 | sed 's/^/    /'
+            rm -f "$link_log"
+            continue
+        fi
+
+        echo ""
+        echo -e "  ${GREEN}Link your phone to ${device_name}:${NC}"
+        echo ""
+
+        # Generate QR code in terminal
+        python3 -c "
+import sys
+try:
+    import qrcode
+    q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
+    q.add_data(sys.argv[1])
+    q.make(fit=True)
+    q.print_ascii(invert=True)
+except ImportError:
+    print('  URI: ' + sys.argv[1])
+    print('  (Install qrcode for QR display: pip install qrcode)')
+" "$uri" 2>/dev/null | sed 's/^/    /'
+
+        # Serve QR as PNG via HTTP for remote scanning
+        if [ "$remote_mode" = "true" ]; then
+            local server_ip
+            server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+            [ -z "$server_ip" ] && server_ip=$(ipconfig getifaddr en0 2>/dev/null)
+            [ -z "$server_ip" ] && server_ip=$(ip route get 1 2>/dev/null | awk '{print $7; exit}')
+            [ -z "$server_ip" ] && server_ip="<your-server-ip>"
+
+            python3 - "$uri" << 'PYEOF' &
+import http.server, socketserver, sys, io, signal as sig
+sig.alarm(120)
+uri = sys.argv[1]
+try:
+    import qrcode
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    png_data = buf.getvalue()
+except Exception:
+    png_data = None
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if png_data:
+            self.send_response(200)
+            self.send_header('Content-type', 'image/png')
+            self.end_headers()
+            self.wfile.write(png_data)
+        else:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(uri.encode())
+    def log_message(self, *a): pass
+s = socketserver.TCPServer(('0.0.0.0', 9090), H)
+s.socket.setsockopt(1, 2, 1)
+s.handle_request()
+PYEOF
+            QR_SERVER_PID=$!
+            echo ""
+            echo -e "    Or open in browser: ${CYAN}http://${server_ip}:9090/${NC}"
+        fi
+
+        echo ""
+        echo "    1. Open Signal on your phone"
+        echo "    2. Settings > Linked Devices > Link New Device"
+        echo "    3. Scan the QR code"
+        echo ""
+        echo -e "  ${BLUE}Waiting for link to complete...${NC}"
+
+        # Wait for signal-cli link process to finish (it blocks until linked or timeout)
+        local timeout=90
+        local waited=0
+        while kill -0 $LINK_PID 2>/dev/null && [ $waited -lt $timeout ]; do
+            sleep 2
+            waited=$((waited + 2))
+        done
+
+        # Clean up QR server
+        [ -n "$QR_SERVER_PID" ] && kill $QR_SERVER_PID 2>/dev/null
+        wait $QR_SERVER_PID 2>/dev/null || true
+
+        # Check result
+        if ! kill -0 $LINK_PID 2>/dev/null; then
+            local link_exit=0
+            wait $LINK_PID 2>/dev/null || link_exit=$?
+
+            if [ $link_exit -eq 0 ] && grep -q "Associated with" "$link_log" 2>/dev/null; then
+                LINKED_NUMBER=$(grep -o '+[0-9]*' "$link_log" | head -1)
+                rm -f "$link_log"
+                echo -e "  ${GREEN}✓${NC} Device linked: ${LINKED_NUMBER:-successfully}"
+                return 0
+            fi
+
+            echo -e "  ${YELLOW}Link did not complete (exit code $link_exit).${NC}"
+            grep -i "error\|fail\|exception" "$link_log" 2>/dev/null | tail -3 | sed 's/^/    /'
+        else
+            kill $LINK_PID 2>/dev/null
+            wait $LINK_PID 2>/dev/null || true
+            echo -e "  ${YELLOW}Link timed out.${NC}"
+        fi
+
+        rm -f "$link_log"
+    done
+
+    echo -e "  ${YELLOW}Could not complete device link after $max_attempts attempts.${NC}"
+    echo -e "  You can re-run the installer to try again."
+    return 1
+}
+
+# Spinner — shows a thinking animation while a background command runs
+# Usage: run_with_spinner "message" command arg1 arg2 ...
+run_with_spinner() {
+    local msg="$1"; shift
+    local spin_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local log
+    log=$(mktemp)
+
+    # Run command in background, capture output
+    "$@" > "$log" 2>&1 &
+    local pid=$!
+
+    # Animate spinner
+    printf "  %s" "$msg"
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r  %s %s" "${spin_chars:i%${#spin_chars}:1}" "$msg"
+        i=$((i + 1))
+        sleep 0.1
+    done
+
+    # Check result
+    wait "$pid"
+    local rc=$?
+    if [ $rc -eq 0 ]; then
+        printf "\r  ${GREEN}✓${NC} %s\n" "$msg"
+    else
+        printf "\r  ${RED}✗${NC} %s\n" "$msg"
+        cat "$log" >&2
+    fi
+    rm -f "$log"
+    return $rc
+}
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -85,6 +377,9 @@ SKIP_SIGNAL=false
 SKIP_SYSTEMD=false
 UNINSTALL=false
 RESTART=false
+QUICK_MODE=false
+NO_PREPACKAGED=false
+PHONE_NUMBER_ARG=""
 
 # Parse arguments
 for arg in "$@"; do
@@ -105,15 +400,32 @@ for arg in "$@"; do
             RESTART=true
             shift
             ;;
+        --quick)
+            QUICK_MODE=true
+            shift
+            ;;
+        --no-prepackaged)
+            NO_PREPACKAGED=true
+            shift
+            ;;
+        --phone=*)
+            PHONE_NUMBER_ARG="${arg#*=}"
+            shift
+            ;;
         --help|-h)
             echo "Usage: ./install.sh [options]"
             echo ""
             echo "Options:"
-            echo "  --skip-signal    Skip Signal pairing (configure later)"
-            echo "  --skip-systemd   Skip service installation"
-            echo "  --uninstall      Remove nightwire service and containers"
-            echo "  --restart        Restart the nightwire service"
-            echo "  --help, -h       Show this help message"
+            echo "  --quick            Minimal prompts — uses smart defaults"
+            echo "  --phone=NUMBER     Set phone number (e.g., --phone=+15551234567)"
+            echo "  --skip-signal      Skip Signal pairing (configure later)"
+            echo "  --skip-systemd     Skip service installation"
+            echo "  --no-prepackaged   Use host-side patching instead of pre-built Docker image"
+            echo "  --uninstall        Remove nightwire service and containers"
+            echo "  --restart          Restart the nightwire service"
+            echo "  --help, -h         Show this help message"
+            echo ""
+            echo "Quick install: ./install.sh --quick --phone=+15551234567"
             exit 0
             ;;
     esac
@@ -124,76 +436,298 @@ done
 # =============================================================================
 if [ "$UNINSTALL" = true ]; then
     echo ""
-    echo -e "${CYAN}nightwire uninstaller${NC}"
+    echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║       nightwire uninstaller          ║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
     echo ""
 
-    REMOVED_SOMETHING=false
+    REMOVED=()
 
-    # --- Stop and disable systemd service (Linux) ---
+    # ── Step 1: Stop and remove services ──────────────────────────────────
+
+    # User-level systemd service (Linux)
     if [ "$(uname)" = "Linux" ] && command -v systemctl &> /dev/null; then
-        SERVICE_FILE="$HOME/.config/systemd/user/nightwire.service"
-        if systemctl --user is-active nightwire &> /dev/null || [ -f "$SERVICE_FILE" ]; then
-            echo -e "${BLUE}Removing systemd service...${NC}"
+        USER_SERVICE_FILE="$HOME/.config/systemd/user/nightwire.service"
+        if systemctl --user is-active nightwire &> /dev/null || [ -f "$USER_SERVICE_FILE" ]; then
+            echo -e "${BLUE}Stopping user systemd service...${NC}"
             systemctl --user stop nightwire 2>/dev/null || true
             systemctl --user disable nightwire 2>/dev/null || true
-            rm -f "$SERVICE_FILE"
+            rm -f "$USER_SERVICE_FILE"
             systemctl --user daemon-reload
-            echo -e "  ${GREEN}✓${NC} Service stopped and removed"
-            REMOVED_SOMETHING=true
+            echo -e "  ${GREEN}✓${NC} User service stopped and removed"
+            REMOVED+=("user systemd service")
+        fi
+
+        # System-level systemd service (may exist from older installs)
+        SYS_SERVICE=""
+        for name in signal-claude-bot nightwire; do
+            if [ -f "/etc/systemd/system/${name}.service" ]; then
+                SYS_SERVICE="/etc/systemd/system/${name}.service"
+                SYS_SERVICE_NAME="${name}"
+                break
+            fi
+        done
+        if [ -n "$SYS_SERVICE" ]; then
+            echo -e "${YELLOW}Found system-level service: ${SYS_SERVICE_NAME}.service${NC}"
+            flush_stdin
+            read -p "  Remove it? (requires sudo) [y/N] " -n 1 -r
+            echo ""
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                sudo systemctl stop "$SYS_SERVICE_NAME" 2>/dev/null || true
+                sudo systemctl disable "$SYS_SERVICE_NAME" 2>/dev/null || true
+                sudo rm -f "$SYS_SERVICE"
+                sudo systemctl daemon-reload
+                echo -e "  ${GREEN}✓${NC} System service ${SYS_SERVICE_NAME} removed"
+                REMOVED+=("system service ($SYS_SERVICE_NAME)")
+            else
+                echo "  Skipped system service removal"
+            fi
         fi
     fi
 
-    # --- Stop and remove launchd service (macOS) ---
+    # macOS launchd service
     if [ "$(uname)" = "Darwin" ]; then
         PLIST_FILE="$HOME/Library/LaunchAgents/com.nightwire.bot.plist"
         if [ -f "$PLIST_FILE" ]; then
             echo -e "${BLUE}Removing launchd service...${NC}"
             launchctl unload "$PLIST_FILE" 2>/dev/null || true
             rm -f "$PLIST_FILE"
-            echo -e "  ${GREEN}✓${NC} Service stopped and removed"
-            REMOVED_SOMETHING=true
+            echo -e "  ${GREEN}✓${NC} launchd service removed"
+            REMOVED+=("launchd service")
+        fi
+
+        # Unset launchctl environment variables that were injected during install
+        ENV_FILE="$CONFIG_DIR/.env"
+        if [ -f "$ENV_FILE" ]; then
+            while IFS='=' read -r key value; do
+                [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+                key=$(echo "$key" | xargs)
+                [ -n "$key" ] && launchctl unsetenv "$key" 2>/dev/null || true
+            done < "$ENV_FILE"
+            REMOVED+=("launchctl environment variables")
         fi
     fi
 
-    # --- Stop Docker containers ---
-    # Checks for legacy "nightwire" container from older Docker installs
-    if command -v docker &> /dev/null; then
+    # Kill any orphaned bot processes (if service stop didn't catch them)
+    BOT_PIDS=$(pgrep -f 'python.*-m nightwire' 2>/dev/null || true)
+    if [ -n "$BOT_PIDS" ]; then
+        echo -e "${BLUE}Stopping orphaned bot process(es)...${NC}"
+        echo "$BOT_PIDS" | xargs kill 2>/dev/null || true
+        sleep 2
+        # Force-kill if still running
+        BOT_PIDS=$(pgrep -f 'python.*-m nightwire' 2>/dev/null || true)
+        [ -n "$BOT_PIDS" ] && echo "$BOT_PIDS" | xargs kill -9 2>/dev/null || true
+        echo -e "  ${GREEN}✓${NC} Orphaned processes stopped"
+        REMOVED+=("orphaned processes")
+    fi
+
+    # ── Step 2: Stop and remove Docker containers and networks ──────────
+
+    if command -v docker &> /dev/null && docker info &> /dev/null 2>&1; then
+        # Use docker compose down to cleanly remove containers + networks
+        COMPOSE_DOWN=false
+        for cfile in docker-compose.yml docker-compose.prepackaged.yml docker-compose.unpatched.yml; do
+            if [ -f "$INSTALL_DIR/$cfile" ]; then
+                echo -e "${BLUE}Stopping Docker compose project...${NC}"
+                (cd "$INSTALL_DIR" && docker compose -f "$cfile" down 2>/dev/null) || true
+                COMPOSE_DOWN=true
+                break
+            fi
+        done
+
+        # Also remove any containers by name (in case compose file is missing)
         for CONTAINER in signal-api nightwire; do
             if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
                 echo -e "${BLUE}Stopping Docker container: ${CONTAINER}...${NC}"
                 docker stop "$CONTAINER" 2>/dev/null || true
                 docker rm "$CONTAINER" 2>/dev/null || true
-                echo -e "  ${GREEN}✓${NC} Container $CONTAINER removed"
-                REMOVED_SOMETHING=true
+                echo -e "  ${GREEN}✓${NC} Container ${CONTAINER} removed"
+                REMOVED+=("container: $CONTAINER")
             fi
         done
+
+        if [ "$COMPOSE_DOWN" = true ]; then
+            echo -e "  ${GREEN}✓${NC} Docker compose project stopped (containers + networks)"
+            REMOVED+=("docker compose project")
+        fi
+
+        # Clean up any orphaned compose networks
+        for net in $(docker network ls --filter name=nightwire --format '{{.Name}}' 2>/dev/null); do
+            docker network rm "$net" 2>/dev/null || true
+            REMOVED+=("docker network: $net")
+        done
+
+        # ── Step 3: Optionally remove Docker images ───────────────────────
+
+        DOCKER_IMAGES=()
+        for img in bbernhard/signal-cli-rest-api:latest nightwire-signal:latest nightwire-sandbox:latest; do
+            if docker image inspect "$img" &> /dev/null; then
+                DOCKER_IMAGES+=("$img")
+            fi
+        done
+        if [ ${#DOCKER_IMAGES[@]} -gt 0 ]; then
+            echo ""
+            echo -e "${YELLOW}Found Docker images:${NC}"
+            for img in "${DOCKER_IMAGES[@]}"; do
+                size=$(docker image inspect "$img" --format '{{.Size}}' 2>/dev/null || echo "0")
+                size_mb=$((size / 1024 / 1024))
+                echo "  - $img (~${size_mb}MB)"
+            done
+            flush_stdin
+            read -p "Remove these Docker images? [y/N] " -n 1 -r
+            echo ""
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                for img in "${DOCKER_IMAGES[@]}"; do
+                    docker rmi "$img" 2>/dev/null || true
+                done
+                echo -e "  ${GREEN}✓${NC} Docker images removed"
+                REMOVED+=("docker images")
+            else
+                echo "  Kept Docker images"
+            fi
+        fi
     fi
 
-    # --- Remove install directory (with confirmation) ---
+    # ── Step 4: Remove signal-cli patches and backups ─────────────────────
+
+    if [ -d "$INSTALL_DIR/signal-cli-${SIGNAL_CLI_VERSION}" ]; then
+        echo -e "${BLUE}Removing signal-cli patches...${NC}"
+        rm -rf "$INSTALL_DIR/signal-cli-${SIGNAL_CLI_VERSION}"
+        echo -e "  ${GREEN}✓${NC} Removed signal-cli-${SIGNAL_CLI_VERSION}/"
+        REMOVED+=("signal-cli patches")
+    fi
+
+    # Remove signal-data backup directories
+    backup_count=0
+    for bak in "$INSTALL_DIR"/signal-data.bak.*; do
+        if [ -d "$bak" ]; then
+            rm -rf "$bak"
+            backup_count=$((backup_count + 1))
+        fi
+    done
+    if [ $backup_count -gt 0 ]; then
+        echo -e "  ${GREEN}✓${NC} Removed $backup_count signal-data backup(s)"
+        REMOVED+=("signal-data backups")
+    fi
+
+    # ── Step 5: Data preservation prompt ──────────────────────────────────
+
+    HAS_DATA=false
+    [ -d "$SIGNAL_DATA_DIR" ] && HAS_DATA=true
+    [ -d "$DATA_DIR" ] && HAS_DATA=true
+
+    if [ "$HAS_DATA" = true ]; then
+        echo ""
+        echo -e "${YELLOW}Your data directories:${NC}"
+        [ -d "$SIGNAL_DATA_DIR" ] && echo "  - $SIGNAL_DATA_DIR  (Signal account)"
+        [ -d "$DATA_DIR" ] && echo "  - $DATA_DIR  (bot memory database)"
+        echo ""
+        flush_stdin
+        read -p "Keep this data? [Y/n] " -n 1 -r
+        echo ""
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            [ -d "$SIGNAL_DATA_DIR" ] && rm -rf "$SIGNAL_DATA_DIR"
+            [ -d "$DATA_DIR" ] && rm -rf "$DATA_DIR"
+            echo -e "  ${GREEN}✓${NC} Data directories removed"
+            REMOVED+=("signal data" "bot data")
+        else
+            echo "  Kept data directories — remove manually later if needed"
+        fi
+    fi
+
+    # ── Step 6: Remove runtime artifacts ──────────────────────────────────
+
+    # Virtual environment
+    if [ -d "$VENV_DIR" ]; then
+        echo -e "${BLUE}Removing Python virtual environment...${NC}"
+        rm -rf "$VENV_DIR"
+        echo -e "  ${GREEN}✓${NC} Removed venv/"
+        REMOVED+=("venv")
+    fi
+
+    # Logs
+    if [ -d "$LOGS_DIR" ]; then
+        rm -rf "$LOGS_DIR"
+        echo -e "  ${GREEN}✓${NC} Removed logs/"
+        REMOVED+=("logs")
+    fi
+
+    # Marker and temp files
+    for f in .use-prepackaged-signal .patched run.sh link_qr.png; do
+        if [ -f "$INSTALL_DIR/$f" ]; then
+            rm -f "$INSTALL_DIR/$f"
+            REMOVED+=("$f")
+        fi
+    done
+
+    # Python build artifacts
+    for d in "$INSTALL_DIR"/nightwire.egg-info "$INSTALL_DIR"/src/*.egg-info; do
+        if [ -d "$d" ]; then
+            rm -rf "$d"
+            REMOVED+=("$(basename "$d")")
+        fi
+    done
+    # Remove __pycache__ directories
+    pycache_count=$(find "$INSTALL_DIR" -type d -name '__pycache__' 2>/dev/null | wc -l)
+    if [ "$pycache_count" -gt 0 ]; then
+        find "$INSTALL_DIR" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+        echo -e "  ${GREEN}✓${NC} Removed $pycache_count __pycache__ directories"
+        REMOVED+=("__pycache__ directories")
+    fi
+
+    # Disable loginctl linger if no other user services remain (Linux only)
+    if [ "$(uname)" = "Linux" ] && command -v loginctl &> /dev/null; then
+        USER_SERVICE_DIR="$HOME/.config/systemd/user"
+        if loginctl show-user "$USER" --property=Linger 2>/dev/null | grep -q "Linger=yes"; then
+            remaining=$(find "$USER_SERVICE_DIR" -name '*.service' 2>/dev/null | wc -l)
+            if [ "$remaining" -eq 0 ]; then
+                echo -e "${BLUE}Disabling loginctl linger (no other user services)...${NC}"
+                sudo loginctl disable-linger "$USER" 2>/dev/null || true
+                echo -e "  ${GREEN}✓${NC} Linger disabled"
+                REMOVED+=("loginctl linger")
+            fi
+        fi
+    fi
+
+    # ── Step 7: Remove install directory ──────────────────────────────────
+
     if [ -d "$INSTALL_DIR" ]; then
         echo ""
-        echo -e "${YELLOW}The install directory contains your configuration and data:${NC}"
-        echo -e "  ${CYAN}$INSTALL_DIR${NC}"
-        echo ""
-        echo "  This includes settings.yaml, .env (API keys), Signal data,"
-        echo "  and any plugin data."
-        echo ""
-        read -p "Remove install directory? [y/N] " -n 1 -r
+        # Show what's left
+        remaining_items=$(ls -A "$INSTALL_DIR" 2>/dev/null | head -20)
+        if [ -n "$remaining_items" ]; then
+            echo -e "${YELLOW}Remaining files in ${INSTALL_DIR}:${NC}"
+            ls -A "$INSTALL_DIR" | while read -r item; do
+                if [ -d "$INSTALL_DIR/$item" ]; then
+                    echo "  📁 $item/"
+                else
+                    echo "  📄 $item"
+                fi
+            done
+            echo ""
+        fi
+        flush_stdin
+        read -p "Remove entire install directory ($INSTALL_DIR)? [y/N] " -n 1 -r
         echo ""
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             rm -rf "$INSTALL_DIR"
             echo -e "  ${GREEN}✓${NC} Removed $INSTALL_DIR"
-            REMOVED_SOMETHING=true
+            REMOVED+=("install directory")
         else
             echo "  Kept $INSTALL_DIR"
         fi
     fi
 
-    if [ "$REMOVED_SOMETHING" = true ]; then
-        echo ""
-        echo -e "${GREEN}nightwire has been uninstalled.${NC}"
+    # ── Summary ───────────────────────────────────────────────────────────
+
+    echo ""
+    if [ ${#REMOVED[@]} -gt 0 ]; then
+        echo -e "${GREEN}nightwire uninstalled.${NC} Removed:"
+        for item in "${REMOVED[@]}"; do
+            echo -e "  ${GREEN}✓${NC} $item"
+        done
     else
-        echo -e "${YELLOW}Nothing to uninstall.${NC} No service, containers, or install directory found."
+        echo -e "${YELLOW}Nothing to uninstall.${NC} No services, containers, or install directory found."
         echo ""
         echo "  Expected install dir: $INSTALL_DIR"
         echo "  Set NIGHTWIRE_DIR if installed elsewhere."
@@ -254,7 +788,7 @@ if [ "$RESTART" = true ]; then
 fi
 
 # Banner
-VERSION="1.5.0"
+VERSION="2.4.1"
 echo -e "${CYAN}"
 cat << 'EOF'
        _       _     _            _
@@ -267,7 +801,7 @@ cat << 'EOF'
 EOF
 echo -e "${NC}"
 echo -e "  ${GREEN}Signal + Claude AI Bot${NC} — v${VERSION}"
-echo -e "  By ${CYAN}hackingdave${NC} — ${CYAN}https://github.com/hackingdave/nightwire${NC}"
+echo -e "  By ${CYAN}offsecginger${NC} — ${CYAN}https://github.com/offsecginger/nightwire${NC}"
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -299,10 +833,14 @@ else
     echo -e "  ${YELLOW}!${NC} Claude CLI not found"
     echo -e "    nightwire requires Claude CLI for code commands (/ask, /do, /complex)."
     echo -e "    Install: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${NC}"
-    read -p "    Continue anyway? [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
+    if [ "$QUICK_MODE" = true ]; then
+        echo -e "    ${BLUE}(--quick: continuing without Claude CLI)${NC}"
+    else
+        read -p "    Continue anyway? [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
     fi
 fi
 
@@ -333,6 +871,12 @@ elif command -v docker &> /dev/null; then
         DOCKER_OK=true
     else
         echo -e "  ${YELLOW}!${NC} Docker installed but not running"
+        if [ "$QUICK_MODE" = true ]; then
+            echo -e "    ${BLUE}(--quick: skipping Signal setup — start Docker and re-run)${NC}"
+            SKIP_SIGNAL=true
+            DOCKER_OK=true
+        fi
+        if [ "$DOCKER_OK" = false ]; then
         echo ""
         if [ "$(uname)" = "Darwin" ]; then
             echo -e "    Start Docker Desktop: ${CYAN}open -a Docker${NC}"
@@ -370,6 +914,7 @@ elif command -v docker &> /dev/null; then
                 DOCKER_OK=true
             fi
         fi
+        fi # end DOCKER_OK=false check
     fi
 else
     echo -e "  ${YELLOW}!${NC} Docker not found"
@@ -419,16 +964,22 @@ else
     fi
 
     if [ "$DOCKER_OK" = false ]; then
-        echo ""
-        read -p "    Skip Signal setup and continue? [y/N] " -n 1 -r
-        echo ""
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if [ "$QUICK_MODE" = true ]; then
+            echo -e "    ${BLUE}(--quick: skipping Signal setup — install Docker and re-run)${NC}"
             SKIP_SIGNAL=true
             DOCKER_OK=true
         else
             echo ""
-            echo "  Install Docker, then re-run this installer."
-            exit 1
+            read -p "    Skip Signal setup and continue? [y/N] " -n 1 -r
+            echo ""
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                SKIP_SIGNAL=true
+                DOCKER_OK=true
+            else
+                echo ""
+                echo "  Install Docker, then re-run this installer."
+                exit 1
+            fi
         fi
     fi
 fi
@@ -454,7 +1005,6 @@ mkdir -p "$SIGNAL_DATA_DIR"
 # Copy config templates if not already present
 if [ -d "$INSTALL_DIR/config" ]; then
     cp -n "$INSTALL_DIR/config/"*.example "$CONFIG_DIR/" 2>/dev/null || true
-    cp -n "$INSTALL_DIR/config/CLAUDE.md" "$CONFIG_DIR/" 2>/dev/null || true
 fi
 
 echo -e "  ${GREEN}✓${NC} Ready ($INSTALL_DIR)"
@@ -465,8 +1015,7 @@ echo -e "  ${GREEN}✓${NC} Ready ($INSTALL_DIR)"
 echo -e "${BLUE}Setting up Python environment...${NC}"
 
 if [ ! -d "$VENV_DIR" ]; then
-    python3 -m venv "$VENV_DIR"
-    echo -e "  ${GREEN}✓${NC} Virtual environment created"
+    run_with_spinner "Creating virtual environment" python3 -m venv "$VENV_DIR"
 fi
 
 source "$VENV_DIR/bin/activate"
@@ -474,9 +1023,30 @@ source "$VENV_DIR/bin/activate"
 if "$VENV_DIR/bin/pip" freeze 2>/dev/null | grep -q aiohttp; then
     echo -e "  ${GREEN}✓${NC} Dependencies already installed"
 else
-    pip install --upgrade pip -q
-    pip install -r "$INSTALL_DIR/requirements.txt" -q
-    echo -e "  ${GREEN}✓${NC} Dependencies installed"
+    run_with_spinner "Installing dependencies (this may take a minute)" bash -c "pip install --upgrade pip -q && pip install -e '$INSTALL_DIR' -q"
+fi
+
+# Fix sqlite-vec on aarch64 — pip wheel v0.1.6 ships a 32-bit ARM binary
+# for the "aarch64" platform. Replace it with the proper 64-bit build.
+ARCH=$(uname -m)
+if [ "$ARCH" = "aarch64" ]; then
+    VEC_SO=$(python -c "import sqlite_vec; print(sqlite_vec.loadable_path())" 2>/dev/null)
+    if [ -n "$VEC_SO" ] && file "${VEC_SO}.so" 2>/dev/null | grep -q "32-bit"; then
+        echo -e "  ${YELLOW}⚠${NC}  sqlite-vec pip wheel has wrong architecture, fixing..."
+        VEC_URL="https://github.com/asg017/sqlite-vec/releases/download/v0.1.7-alpha.10/sqlite-vec-0.1.7-alpha.10-loadable-linux-aarch64.tar.gz"
+        TMPDIR=$(mktemp -d)
+        if curl -sL "$VEC_URL" | tar xz -C "$TMPDIR" 2>/dev/null; then
+            if file "$TMPDIR/vec0.so" | grep -q "64-bit"; then
+                cp "$TMPDIR/vec0.so" "${VEC_SO}.so"
+                echo -e "  ${GREEN}✓${NC} sqlite-vec aarch64 binary fixed"
+            else
+                echo -e "  ${YELLOW}⚠${NC}  Downloaded binary still not 64-bit, skipping"
+            fi
+        else
+            echo -e "  ${YELLOW}⚠${NC}  Could not download sqlite-vec fix (vector search will use fallback)"
+        fi
+        rm -rf "$TMPDIR"
+    fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -520,18 +1090,27 @@ YAML
     fi
 fi
 
-# Get phone number
-echo -e "  Enter your phone number (e.g., +15551234567):"
-read -p "  > " PHONE_NUMBER
+# Get phone number (accept from --phone flag or prompt)
+if [ -n "$PHONE_NUMBER_ARG" ]; then
+    PHONE_NUMBER="$PHONE_NUMBER_ARG"
+    echo -e "  Phone number: ${GREEN}$PHONE_NUMBER${NC}"
+else
+    echo -e "  Enter your phone number (e.g., +15551234567):"
+    read -p "  > " PHONE_NUMBER
+fi
 
 if [ -n "$PHONE_NUMBER" ]; then
     if [[ ! "$PHONE_NUMBER" =~ ^\+[1-9][0-9]{6,14}$ ]]; then
         echo -e "  ${YELLOW}Warning: doesn't look like E.164 format (e.g., +15551234567)${NC}"
-        read -p "  Continue anyway? [y/N] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "  Please re-run the installer with a valid phone number."
-            exit 1
+        if [ "$QUICK_MODE" = true ]; then
+            echo -e "  ${BLUE}(--quick: using phone number as-is)${NC}"
+        else
+            read -p "  Continue anyway? [y/N] " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                echo "  Please re-run the installer with a valid phone number."
+                exit 1
+            fi
         fi
     fi
     sed_inplace "s/+1XXXXXXXXXX/$PHONE_NUMBER/" "$SETTINGS_FILE"
@@ -553,13 +1132,18 @@ EOF
 fi
 
 # Optional AI assistant (not required — Claude handles all code tasks)
-echo ""
-echo -e "  ${BLUE}Optional:${NC} nightwire can use OpenAI or Grok as a lightweight"
-echo "  assistant for general knowledge questions (\"nightwire: what is X?\")."
-echo "  This is NOT required — Claude handles all code commands (/ask, /do, /complex)."
-echo ""
-read -p "  Enable optional AI assistant? [y/N] " -n 1 -r
-echo ""
+if [ "$QUICK_MODE" = true ]; then
+    echo -e "  ${BLUE}(--quick: skipping optional AI assistant — enable later in settings.yaml)${NC}"
+    REPLY="n"
+else
+    echo ""
+    echo -e "  ${BLUE}Optional:${NC} nightwire can use OpenAI or Grok as a lightweight"
+    echo "  assistant for general knowledge questions (\"nightwire: what is X?\")."
+    echo "  This is NOT required — Claude handles all code commands (/ask, /do, /complex)."
+    echo ""
+    read -p "  Enable optional AI assistant? [y/N] " -n 1 -r
+    echo ""
+fi
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     sed_inplace "s/enabled: false/enabled: true/" "$SETTINGS_FILE"
     echo ""
@@ -603,13 +1187,18 @@ fi
 # -----------------------------------------------------------------------------
 # Projects directory
 # -----------------------------------------------------------------------------
-echo ""
-echo -e "  ${BLUE}Projects directory:${NC} Where your code projects live."
-echo "  Claude will be able to work on any project registered from this folder."
-echo ""
 DEFAULT_PROJECTS="$HOME/projects"
-read -p "  Projects path [$DEFAULT_PROJECTS]: " PROJECTS_PATH
-PROJECTS_PATH="${PROJECTS_PATH:-$DEFAULT_PROJECTS}"
+if [ "$QUICK_MODE" = true ]; then
+    PROJECTS_PATH="$DEFAULT_PROJECTS"
+    echo -e "  ${BLUE}(--quick: using default projects path: $PROJECTS_PATH)${NC}"
+else
+    echo ""
+    echo -e "  ${BLUE}Projects directory:${NC} Where your code projects live."
+    echo "  Claude will be able to work on any project registered from this folder."
+    echo ""
+    read -p "  Projects path [$DEFAULT_PROJECTS]: " PROJECTS_PATH
+    PROJECTS_PATH="${PROJECTS_PATH:-$DEFAULT_PROJECTS}"
+fi
 
 # Expand ~ if used
 PROJECTS_PATH="${PROJECTS_PATH/#\~/$HOME}"
@@ -638,9 +1227,14 @@ if [ -d "$PROJECTS_PATH" ]; then
         for d in "${SUBDIRS[@]}"; do
             echo "    - $d"
         done
-        echo ""
-        read -p "  Auto-register all as projects? [Y/n] " -n 1 -r
-        echo ""
+        if [ "$QUICK_MODE" = true ]; then
+            REPLY="y"
+            echo -e "  ${BLUE}(--quick: auto-registering ${#SUBDIRS[@]} project(s))${NC}"
+        else
+            echo ""
+            read -p "  Auto-register all as projects? [Y/n] " -n 1 -r
+            echo ""
+        fi
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
             # Create projects.yaml with all subdirectories
             PROJECTS_FILE="$CONFIG_DIR/projects.yaml"
@@ -663,51 +1257,85 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Optional: Docker sandbox for Claude CLI execution
+# Docker Sandbox (optional)
 # -----------------------------------------------------------------------------
-if command -v docker &> /dev/null && docker info &> /dev/null; then
-    echo ""
-    echo -e "  ${BLUE}Optional:${NC} nightwire can run Claude CLI inside a Docker sandbox"
-    echo "  for additional security isolation. This builds a container image"
-    echo "  with Python, Node.js, and Claude CLI."
-    echo ""
-    read -p "  Enable Docker sandbox? [y/N] " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+if [ "$DOCKER_OK" = true ]; then
+    if [ "$QUICK_MODE" = true ]; then
+        echo -e "  ${BLUE}(--quick: skipping Docker sandbox — enable later in settings.yaml)${NC}"
+        REPLY="n"
+    else
         echo ""
-        echo -e "  ${BLUE}Building sandbox image...${NC}"
-        SANDBOX_BUILD_LOG="$LOGS_DIR/sandbox-build.log"
-        if docker build -t nightwire-sandbox:latest -f "$INSTALL_DIR/Dockerfile.sandbox" "$INSTALL_DIR" > "$SANDBOX_BUILD_LOG" 2>&1; then
-            echo -e "  ${GREEN}✓${NC} Sandbox image built: nightwire-sandbox:latest"
-            # Add sandbox config to settings.yaml (idempotent — skip if already present)
+        echo -e "  ${BLUE}Optional:${NC} Docker sandbox runs Claude CLI inside a container."
+        echo "  This adds complexity and is only needed if you're working on sensitive"
+        echo "  projects that you don't want Claude to have access to — Claude is already"
+        echo "  restricted to the projects folder. Requires building a Docker image (~400MB)."
+        echo ""
+        echo -e "  Most users should say ${GREEN}no${NC}."
+        echo ""
+        read -p "  Enable Docker sandbox? [y/N] " -n 1 -r
+        echo ""
+    fi
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if run_with_spinner "Building sandbox image (this may take a few minutes)" docker build -t nightwire-sandbox:latest -f "$INSTALL_DIR/Dockerfile.sandbox" "$INSTALL_DIR"; then
+            echo -e "  ${GREEN}✓${NC} Sandbox image built (nightwire-sandbox:latest)"
+
+            # Enable sandbox in settings.yaml — append if not already present
             if ! grep -q "^sandbox:" "$SETTINGS_FILE" 2>/dev/null; then
                 cat >> "$SETTINGS_FILE" << 'SANDBOXEOF'
 
-# Docker sandbox for Claude CLI execution
+# Docker Sandbox
 sandbox:
   enabled: true
   image: "nightwire-sandbox:latest"
   network: false
   memory_limit: "2g"
   cpu_limit: 2.0
+  tmpfs_size: "256m"
 SANDBOXEOF
-                echo -e "  ${GREEN}✓${NC} Sandbox config added to settings.yaml"
-            else
-                echo -e "  ${GREEN}✓${NC} Sandbox config already present in settings.yaml"
             fi
+            echo -e "  ${GREEN}✓${NC} Sandbox enabled in config"
         else
-            echo -e "  ${RED}Sandbox image build failed.${NC}"
-            echo "  Last 10 lines of build log:"
-            tail -10 "$SANDBOX_BUILD_LOG" 2>/dev/null
-            echo ""
-            echo -e "  Build log: ${CYAN}$SANDBOX_BUILD_LOG${NC}"
-            echo -e "  To build manually: ${CYAN}docker build -t nightwire-sandbox:latest -f Dockerfile.sandbox .${NC}"
+            echo "    You can retry later:"
+            echo "    cd $INSTALL_DIR && docker build -t nightwire-sandbox:latest -f Dockerfile.sandbox ."
         fi
     fi
 fi
 
 # -----------------------------------------------------------------------------
-# Signal Pairing — automatic, no choices
+# Pre-packaged Signal Docker Image (default: builds patches into the image)
+# -----------------------------------------------------------------------------
+USE_PREPACKAGED=false
+PREPACKAGED_MARKER="$INSTALL_DIR/.use-prepackaged-signal"
+
+if [ "$DOCKER_OK" = true ] && [ "$SKIP_SIGNAL" = false ]; then
+    if [ "$NO_PREPACKAGED" = true ]; then
+        echo -e "  ${YELLOW}!${NC} Using host-side patching (--no-prepackaged)"
+    else
+        USE_PREPACKAGED=true
+
+        # Check if image already exists
+        if docker image inspect nightwire-signal:latest &>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} Pre-packaged image already built (nightwire-signal:latest)"
+        else
+            if run_with_spinner "Building pre-packaged Signal image (this may take a few minutes)" docker build -t nightwire-signal:latest -f "$INSTALL_DIR/Dockerfile.signal" "$INSTALL_DIR"; then
+                echo -e "  ${GREEN}✓${NC} Pre-packaged image built (nightwire-signal:latest)"
+            else
+                echo "    Falling back to manual patching."
+                echo "    You can retry later:"
+                echo "    cd $INSTALL_DIR && docker build -t nightwire-signal:latest -f Dockerfile.signal ."
+                USE_PREPACKAGED=false
+            fi
+        fi
+
+        # Write marker file so upgrades/restarts know which mode to use
+        if [ "$USE_PREPACKAGED" = true ]; then
+            echo "true" > "$PREPACKAGED_MARKER"
+        fi
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# Signal Pairing — uses patched signal-cli on host for reliable linking
 # -----------------------------------------------------------------------------
 SIGNAL_PAIRED=false
 
@@ -716,134 +1344,77 @@ if [ "$SKIP_SIGNAL" = false ]; then
     echo -e "${BLUE}Signal Pairing${NC}"
     echo ""
 
-    # Start Signal bridge container
     mkdir -p "$SIGNAL_DATA_DIR"
 
-    echo -e "  Starting Signal bridge..."
+    # Device name prompt (shown in Signal's linked devices list)
+    DEVICE_NAME="nightwire"
+    if [ "$QUICK_MODE" != true ]; then
+        flush_stdin
+        read -p "  Device name [nightwire]: " DEVICE_NAME_INPUT
+        DEVICE_NAME="${DEVICE_NAME_INPUT:-nightwire}"
+    fi
+
+    # Clean stale signal-data from previous failed link attempts
+    if [ -d "$SIGNAL_DATA_DIR/data" ]; then
+        ACCT_FILE="$SIGNAL_DATA_DIR/data/accounts.json"
+        STALE_DATA=false
+        if [ -f "$ACCT_FILE" ]; then
+            acct_content=$(cat "$ACCT_FILE" 2>/dev/null || echo "")
+            # Empty/trivial accounts.json = stale from failed link
+            if [ -z "$acct_content" ] || [ "$acct_content" = "[]" ] || [ "$acct_content" = "{}" ]; then
+                STALE_DATA=true
+            fi
+            # "multi-account" marker = corrupt data from bbernhard's multi-account mode
+            if echo "$acct_content" | grep -q "multi-account" 2>/dev/null; then
+                STALE_DATA=true
+            fi
+        fi
+        if [ "$STALE_DATA" = true ]; then
+            echo -e "  ${YELLOW}Cleaning stale signal data from previous attempt...${NC}"
+            rm -rf "$SIGNAL_DATA_DIR/data"
+            echo -e "  ${GREEN}✓${NC} Stale data removed"
+        fi
+    fi
 
     # Ask about remote access for QR code scanning
-    SIGNAL_BIND="127.0.0.1"
     REMOTE_MODE=false
     if [ -n "$SSH_CONNECTION" ]; then
         echo -e "  ${YELLOW}Remote session detected.${NC}"
-        echo ""
-    fi
-    read -p "  Will you scan the QR code from another device (e.g., SSH'd in)? [y/N] " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
         REMOTE_MODE=true
-        SIGNAL_BIND="0.0.0.0"
-        echo -e "  Signal bridge will be ${YELLOW}temporarily${NC} exposed on all interfaces for QR scanning."
-        echo -e "  After pairing completes, it will be ${GREEN}automatically locked to localhost${NC}"
-        echo -e "  and will no longer be accessible remotely. This is for security."
+        echo -e "  QR code will be served on port 9090 for remote scanning."
+    elif [ "$QUICK_MODE" = true ]; then
+        echo -e "  ${BLUE}(--quick: QR code will display in terminal)${NC}"
+    else
+        read -p "  Will you scan the QR code from another device (e.g., SSH'd in)? [y/N] " -n 1 -r
         echo ""
-    fi
-
-    # Start in native mode for QR code pairing
-    # Force-remove any existing signal-api container (--restart policy can race with stop/rm)
-    docker rm -f signal-api 2>/dev/null || true
-    sleep 1
-
-    # Also check if something else is holding port 8080
-    if docker ps --format '{{.Ports}}' 2>/dev/null | grep -q "0.0.0.0:8080\|127.0.0.1:8080"; then
-        BLOCKER=$(docker ps --format '{{.Names}}: {{.Ports}}' | grep ":8080" | head -1)
-        echo -e "  ${YELLOW}Port 8080 is in use by: $BLOCKER${NC}"
-        echo -e "  Stopping it..."
-        BLOCKER_NAME=$(echo "$BLOCKER" | cut -d: -f1)
-        docker rm -f "$BLOCKER_NAME" 2>/dev/null || true
-        sleep 1
-    fi
-
-    docker run -d \
-        --name signal-api \
-        --restart unless-stopped \
-        -p "$SIGNAL_BIND:8080:8080" \
-        -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
-        -e MODE=native \
-        bbernhard/signal-cli-rest-api:latest
-
-    if ! docker ps | grep -q signal-api; then
-        echo -e "  ${RED}Signal bridge failed to start${NC}"
-        docker logs signal-api 2>&1 | tail -5
-        echo ""
-        echo -e "  You can re-run the installer later to set up Signal."
-    elif wait_for_qrcode 90; then
-        echo ""
-        echo -e "  ${GREEN}✓${NC} Signal bridge ready"
-        echo ""
-
-        # --- Device linking ---
-        echo -e "  ${GREEN}Link your phone to nightwire:${NC}"
-        echo ""
-        echo "    1. Open this URL in your browser to see the QR code:"
-        echo ""
-        if [ "$REMOTE_MODE" = true ]; then
-            SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-            [ -z "$SERVER_IP" ] && SERVER_IP=$(ipconfig getifaddr en0 2>/dev/null)
-            [ -z "$SERVER_IP" ] && SERVER_IP=$(ip route get 1 2>/dev/null | awk '{print $7; exit}')
-            [ -z "$SERVER_IP" ] && SERVER_IP="<your-server-ip>"
-            echo -e "       ${CYAN}http://${SERVER_IP}:8080/v1/qrcodelink?device_name=nightwire${NC}"
-        else
-            echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=nightwire${NC}"
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            REMOTE_MODE=true
+            echo -e "  QR code will be served on port 9090 for remote scanning."
+            echo -e "  After pairing, the port is ${GREEN}automatically closed${NC}."
         fi
         echo ""
-        echo "    2. Open Signal on your phone"
-        echo "    3. Settings > Linked Devices > Link New Device"
-        echo "    4. Scan the QR code from your browser"
+    fi
+
+    # Prepare patched signal-cli for device linking (persisted to $INSTALL_DIR/signal-cli-*)
+    if prepare_link_tool "$INSTALL_DIR"; then
         echo ""
-        flush_stdin
-        read -p "  Press Enter after scanning the QR code..."
 
-        echo ""
-        echo -e "  Verifying link..."
-        sleep 3
+        # Stop any existing signal-api container (frees port 8080 and avoids conflicts)
+        docker rm -f signal-api 2>/dev/null || true
 
-        ACCOUNTS=$(curl -s "http://127.0.0.1:8080/v1/accounts" 2>/dev/null)
-        if echo "$ACCOUNTS" | grep -q "+"; then
-            LINKED_NUMBER=$(echo "$ACCOUNTS" | grep -o '+[0-9]*' | head -1)
-            echo -e "  ${GREEN}✓${NC} Device linked: $LINKED_NUMBER"
-
-            if [ "$LINKED_NUMBER" != "$PHONE_NUMBER" ] && [ -n "$LINKED_NUMBER" ]; then
-                sed_inplace "s/$PHONE_NUMBER/$LINKED_NUMBER/" "$SETTINGS_FILE" 2>/dev/null || true
-            fi
+        # Run device linking
+        if run_device_link "$SIGNAL_DATA_DIR" "$REMOTE_MODE" "$DEVICE_NAME"; then
             SIGNAL_PAIRED=true
-        else
-            echo -e "  ${YELLOW}Could not verify link.${NC}"
-            echo -e "  Check: ${CYAN}http://127.0.0.1:8080/v1/accounts${NC}"
-            echo ""
-            echo "  You may need to wait a moment and try scanning again."
-            flush_stdin
-            read -p "  Retry verification? [Y/n] " -n 1 -r
-            echo ""
-            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-                sleep 3
-                ACCOUNTS=$(curl -s "http://127.0.0.1:8080/v1/accounts" 2>/dev/null)
-                if echo "$ACCOUNTS" | grep -q "+"; then
-                    LINKED_NUMBER=$(echo "$ACCOUNTS" | grep -o '+[0-9]*' | head -1)
-                    echo -e "  ${GREEN}✓${NC} Device linked: $LINKED_NUMBER"
-                    if [ "$LINKED_NUMBER" != "$PHONE_NUMBER" ] && [ -n "$LINKED_NUMBER" ]; then
-                        sed_inplace "s/$PHONE_NUMBER/$LINKED_NUMBER/" "$SETTINGS_FILE" 2>/dev/null || true
-                    fi
-                    SIGNAL_PAIRED=true
-                else
-                    echo -e "  ${YELLOW}Still not verified. You can pair later via:${NC}"
-                    echo -e "    ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=nightwire${NC}"
-                fi
+
+            if [ -n "$LINKED_NUMBER" ] && [ "$LINKED_NUMBER" != "$PHONE_NUMBER" ]; then
+                sed_inplace "s/$PHONE_NUMBER/$LINKED_NUMBER/" "$SETTINGS_FILE" 2>/dev/null || true
             fi
         fi
     else
         echo ""
-        echo -e "  ${YELLOW}Signal bridge is taking too long to initialize.${NC}"
-        echo ""
-        echo "  This can happen on first run. Try these troubleshooting steps:"
-        echo "    1. Check container logs: docker logs signal-api"
-        echo "    2. Restart the container: docker restart signal-api"
-        echo "    3. Wait a minute, then open in browser:"
-        echo -e "       ${CYAN}http://127.0.0.1:8080/v1/qrcodelink?device_name=nightwire${NC}"
-        echo ""
-        echo "  The install will continue — you can pair later."
+        echo -e "  ${YELLOW}Could not prepare link tool.${NC}"
+        echo -e "  You can pair later by re-running the installer."
     fi
-
 fi
 
 # -----------------------------------------------------------------------------
@@ -854,20 +1425,78 @@ if command -v docker &> /dev/null && docker info &> /dev/null; then
     echo -e "${BLUE}Starting Signal bridge...${NC}"
 
     mkdir -p "$SIGNAL_DATA_DIR"
-    docker rm -f signal-api 2>/dev/null || true
-    sleep 1
 
-    docker run -d \
-        --name signal-api \
-        --restart unless-stopped \
-        -p "127.0.0.1:8080:8080" \
-        -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
-        -e MODE=json-rpc \
-        bbernhard/signal-cli-rest-api:latest
+    # Back up signal data before starting (prevents session loss on container issues)
+    if [ -f "$SIGNAL_DATA_DIR/data/accounts.json" ]; then
+        BACKUP_DIR="$SIGNAL_DATA_DIR.bak.$(date +%Y%m%d_%H%M%S)"
+        cp -a "$SIGNAL_DATA_DIR" "$BACKUP_DIR" 2>/dev/null || true
+        echo -e "  ${GREEN}✓${NC} Signal data backed up"
+    fi
+
+    # Detect Docker Compose command (v2 plugin or v1 standalone)
+    COMPOSE=""
+    if docker compose version &>/dev/null; then
+        COMPOSE="docker compose"
+    elif command -v docker-compose &>/dev/null; then
+        COMPOSE="docker-compose"
+    fi
+
+    # Choose compose file based on prepackaged image mode
+    if [ "$USE_PREPACKAGED" = true ]; then
+        COMPOSE_FILE="docker-compose.prepackaged.yml"
+    else
+        COMPOSE_FILE="docker-compose.yml"
+    fi
+
+    if [ -n "$COMPOSE" ] && [ -f "$INSTALL_DIR/$COMPOSE_FILE" ]; then
+        cd "$INSTALL_DIR"
+        $COMPOSE -f "$COMPOSE_FILE" up -d --force-recreate
+        cd - > /dev/null
+    else
+        # Fallback: direct docker run (when docker compose is unavailable)
+        docker rm -f signal-api 2>/dev/null || true
+        sleep 1
+
+        if [ "$USE_PREPACKAGED" = true ]; then
+            # Pre-packaged image: no volume mounts for patches needed
+            docker run -d \
+                --name signal-api \
+                --restart unless-stopped \
+                --health-cmd "curl -sf http://127.0.0.1:8080/v1/about || exit 1" \
+                --health-interval 60s \
+                --health-timeout 10s \
+                --health-retries 3 \
+                --health-start-period 30s \
+                -p "127.0.0.1:8080:8080" \
+                -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
+                -e MODE=json-rpc \
+                nightwire-signal:latest
+        else
+            # Classic mode: mount patched signal-cli from host
+            PATCH_MOUNT_ARGS=""
+            if [ -d "$INSTALL_DIR/signal-cli-${SIGNAL_CLI_VERSION}" ]; then
+                PATCH_MOUNT_ARGS="-v $INSTALL_DIR/signal-cli-${SIGNAL_CLI_VERSION}:/opt/signal-cli-0.13.23 -e JAVA_OPTS=-Djava.library.path=/opt/signal-cli-0.13.23/lib"
+            fi
+
+            docker run -d \
+                --name signal-api \
+                --restart unless-stopped \
+                --health-cmd "curl -sf http://127.0.0.1:8080/v1/about || exit 1" \
+                --health-interval 60s \
+                --health-timeout 10s \
+                --health-retries 3 \
+                --health-start-period 30s \
+                -p "127.0.0.1:8080:8080" \
+                -v "$SIGNAL_DATA_DIR:/home/.local/share/signal-cli" \
+                $PATCH_MOUNT_ARGS \
+                -e MODE=json-rpc \
+                bbernhard/signal-cli-rest-api:latest
+        fi
+    fi
 
     sleep 3
     if docker ps | grep -q signal-api; then
-        echo -e "  ${GREEN}✓${NC} Signal bridge running (json-rpc mode)"
+        echo -e "  ${GREEN}✓${NC} Signal bridge running (json-rpc mode, with health checks)"
     else
         echo -e "  ${YELLOW}Signal bridge did not start. Check: docker logs signal-api${NC}"
     fi
@@ -896,8 +1525,13 @@ if [ "$SKIP_SYSTEMD" = false ]; then
 
     if [ "$(uname)" = "Linux" ] && command -v systemctl &> /dev/null; then
         # --- Linux: systemd service ---
-        read -p "Start nightwire as a service (auto-starts on boot)? [Y/n] " -n 1 -r
-        echo ""
+        if [ "$QUICK_MODE" = true ]; then
+            REPLY="y"
+            echo -e "  ${BLUE}(--quick: installing systemd service)${NC}"
+        else
+            read -p "Start nightwire as a service (auto-starts on boot)? [Y/n] " -n 1 -r
+            echo ""
+        fi
 
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
             SERVICE_FILE="$HOME/.config/systemd/user/nightwire.service"
@@ -913,12 +1547,16 @@ Type=simple
 WorkingDirectory=$INSTALL_DIR
 Environment="PATH=$VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=-$CONFIG_DIR/.env
+ExecStartPre=/bin/bash -c '[ -f $INSTALL_DIR/.use-prepackaged-signal ] || ([ -x $INSTALL_DIR/scripts/apply-signal-patches.sh ] && $INSTALL_DIR/scripts/apply-signal-patches.sh $INSTALL_DIR) || echo "WARNING: signal-cli patches failed to apply" >&2'
+ExecStartPre=/bin/bash -c 'CFILE=docker-compose.yml; [ -f $INSTALL_DIR/.use-prepackaged-signal ] && CFILE=docker-compose.prepackaged.yml; [ "\$CFILE" = "docker-compose.yml" ] && [ ! -f $INSTALL_DIR/signal-cli-0.13.24/.patched ] && CFILE=docker-compose.unpatched.yml && echo "WARNING: Using unpatched signal-cli (patches not applied). Run: ./scripts/apply-signal-patches.sh" >&2; cd $INSTALL_DIR && docker compose -f \$CFILE up -d 2>/dev/null || docker start signal-api 2>/dev/null || true'
 ExecStart=$VENV_DIR/bin/python3 -m nightwire
 StandardOutput=append:$LOGS_DIR/nightwire.log
 StandardError=append:$LOGS_DIR/nightwire.log
 Restart=on-failure
 RestartSec=10
 RestartForceExitStatus=75
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Install]
 WantedBy=default.target
@@ -945,8 +1583,13 @@ EOF
 
     elif [ "$(uname)" = "Darwin" ]; then
         # --- macOS: launchd plist ---
-        read -p "Start nightwire as a service (auto-starts on login)? [Y/n] " -n 1 -r
-        echo ""
+        if [ "$QUICK_MODE" = true ]; then
+            REPLY="y"
+            echo -e "  ${BLUE}(--quick: installing launchd service)${NC}"
+        else
+            read -p "Start nightwire as a service (auto-starts on login)? [Y/n] " -n 1 -r
+            echo ""
+        fi
 
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
             PLIST_DIR="$HOME/Library/LaunchAgents"
@@ -1074,5 +1717,5 @@ fi
 
 echo ""
 echo -e "  Config:  ${CYAN}$CONFIG_DIR/settings.yaml${NC}"
-echo -e "  Docs:    ${CYAN}https://github.com/hackingdave/nightwire${NC}"
+echo -e "  Docs:    ${CYAN}https://github.com/offsecginger/nightwire${NC}"
 echo ""

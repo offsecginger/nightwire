@@ -477,13 +477,31 @@ class MemoryManager:
             except Exception as e:
                 logger.warning("summarizer_failed", error=str(e))
 
+        # Fetch recent /do command history for conversational continuity
+        command_history = None
+        try:
+            history = await self.get_history(
+                phone_number, project_name=project_name, limit=10
+            )
+            # Filter to /do commands only, format as role/content dicts
+            command_history = [
+                {"role": h.role, "content": h.content}
+                for h in history
+                if getattr(h, "command_type", None) == "do"
+            ]
+            if not command_history:
+                command_history = None
+        except Exception as e:
+            logger.debug("command_history_fetch_failed", error=str(e))
+
         # Build the context section
         return builder.build_context_section(
             preferences=preferences,
             explicit_memories=memories,
             relevant_history=search_results if not summarized_context else None,
             summarized_context=summarized_context,
-            current_project=project_name
+            current_project=project_name,
+            command_history=command_history,
         )
 
     # Deletion operations

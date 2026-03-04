@@ -1,11 +1,11 @@
-# Signal CLI REST API bridge for nightwire
+# Signal CLI REST API bridge for nightwire (unpatched fallback)
 #
-# The bot runs natively (Python venv + systemd/launchd).
-# This compose file only runs the Signal messaging bridge.
+# Used when signal-cli patches have not been applied.
+# Does NOT mount the patched signal-cli directory.
+# The container runs its bundled signal-cli (may have protocol issues).
 #
-# Usage:
-#   docker compose up -d
-#   docker compose logs -f signal-api
+# Normally docker-compose.yml is used (with patches mounted).
+# This file is selected automatically by the startup script.
 
 services:
   signal-api:
@@ -16,12 +16,8 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - ./signal-data:/home/.local/share/signal-cli
-      # Mount patched signal-cli over container's bundled version
-      - ./signal-cli-0.13.24:/opt/signal-cli-0.13.23
     environment:
       - MODE=json-rpc
-      # Point Java to the native library in the mounted signal-cli
-      - JAVA_OPTS=-Djava.library.path=/opt/signal-cli-0.13.23/lib
     healthcheck:
       test: ["CMD", "sh", "-c", "curl -sf http://127.0.0.1:8080/v1/about && curl -sf http://127.0.0.1:8080/v1/accounts"]
       interval: 60s

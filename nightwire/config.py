@@ -116,6 +116,11 @@ class Config:
         return os.environ.get("SIGNAL_API_URL") or self.settings.get("signal_api_url", "http://127.0.0.1:8080")
 
     @property
+    def instance_name(self) -> str:
+        """Instance name for message prefixes (default: nightwire)."""
+        return self.settings.get("instance_name", "nightwire")
+
+    @property
     def projects_base_path(self) -> Path:
         """Get base path for projects."""
         configured = self.settings.get("projects_base_path")
@@ -231,13 +236,21 @@ class Config:
         }
 
     # nightwire AI assistant configuration (any OpenAI-compatible provider)
-    @property
-    def nightwire_assistant_enabled(self) -> bool:
-        """Whether nightwire AI assistant is enabled."""
-        sc_config = (
+
+    def _get_assistant_config(self) -> dict:
+        """Get nightwire assistant config dict, protecting against non-dict values."""
+        cfg = (
             self.settings.get("nightwire_assistant")
             or self.settings.get("sidechannel_assistant", {})
         )
+        if not isinstance(cfg, dict):
+            return {}
+        return cfg
+
+    @property
+    def nightwire_assistant_enabled(self) -> bool:
+        """Whether nightwire AI assistant is enabled."""
+        sc_config = self._get_assistant_config()
         if sc_config.get("enabled") is not None:
             return sc_config.get("enabled", False)
         # Fallback to legacy nova / grok config
@@ -264,10 +277,7 @@ class Config:
         4. Both keys present -> 'grok' (backward compat)
         5. Neither key -> 'grok' (will fail gracefully at call time)
         """
-        sc_config = (
-            self.settings.get("nightwire_assistant")
-            or self.settings.get("sidechannel_assistant", {})
-        )
+        sc_config = self._get_assistant_config()
         explicit = sc_config.get("provider")
         if explicit:
             return explicit
@@ -295,10 +305,7 @@ class Config:
         3. provider == 'grok' -> GROK_API_KEY
         4. Fallback: NIGHTWIRE_API_KEY env var
         """
-        sc_config = (
-            self.settings.get("nightwire_assistant")
-            or self.settings.get("sidechannel_assistant", {})
-        )
+        sc_config = self._get_assistant_config()
         api_key_env = sc_config.get("api_key_env")
         if api_key_env:
             key = os.environ.get(api_key_env, "")
@@ -321,10 +328,7 @@ class Config:
         2. Provider presets: openai/grok
         3. No default for unknown providers (log warning)
         """
-        sc_config = (
-            self.settings.get("nightwire_assistant")
-            or self.settings.get("sidechannel_assistant", {})
-        )
+        sc_config = self._get_assistant_config()
         custom_url = sc_config.get("api_url")
         if custom_url:
             return custom_url
@@ -351,10 +355,7 @@ class Config:
         2. Provider presets: openai -> gpt-4o, grok -> grok-3-latest
         3. No default for unknown providers (log warning)
         """
-        sc_config = (
-            self.settings.get("nightwire_assistant")
-            or self.settings.get("sidechannel_assistant", {})
-        )
+        sc_config = self._get_assistant_config()
         model = sc_config.get("model")
         if model:
             return model
@@ -383,6 +384,8 @@ class Config:
         default = 1024
         for section in ("nightwire_assistant", "sidechannel_assistant", "nova", "grok"):
             cfg = self.settings.get(section, {})
+            if not isinstance(cfg, dict):
+                continue
             val = cfg.get("max_tokens")
             if val is not None:
                 try:
@@ -442,7 +445,7 @@ class Config:
         auto_config = self.settings.get("autonomous", {})
         val = auto_config.get("max_parallel", 3)
         try:
-            return min(int(val), 10)
+            return max(1, min(int(val), 10))
         except (ValueError, TypeError):
             logger.warning("config_invalid_max_parallel", value=val)
             return 3

@@ -26,7 +26,8 @@ class AutoUpdater:
     """Checks for updates and applies them on admin approval."""
 
     def __init__(self, config, send_message: Callable[[str, str], Awaitable[None]],
-                 repo_dir: Optional[Path] = None):
+                 repo_dir: Optional[Path] = None,
+                 shutdown_callback: Optional[Callable[[], None]] = None):
         self.config = config
         self.send_message = send_message
         self.repo_dir = repo_dir or Path(__file__).parent.parent
@@ -34,6 +35,7 @@ class AutoUpdater:
         self.check_interval = config.auto_update_check_interval
         self.admin_phone = config.allowed_numbers[0] if config.allowed_numbers else None
         self._lock = asyncio.Lock()
+        self._shutdown_callback = shutdown_callback
 
         # Validate branch name to prevent git flag injection
         if not _BRANCH_RE.match(self.branch):
@@ -42,6 +44,7 @@ class AutoUpdater:
         # Update state
         self.pending_update = False
         self.pending_sha: Optional[str] = None
+        self.update_applied = False
         self._check_task: Optional[asyncio.Task] = None
 
     async def _run_git(self, *args: str) -> str:
@@ -130,8 +133,15 @@ class AutoUpdater:
                 if pip_result.returncode != 0:
                     raise RuntimeError(f"pip install failed: {pip_result.stderr}")
 
+                # Run post-update hooks (non-fatal — don't rollback on hook failure)
+                try:
+                    await self._run_post_update_hooks()
+                except Exception as e:
+                    logger.warning("post_update_hooks_nonfatal", error=str(e))
+
                 self.pending_update = False
                 self.pending_sha = None
+                self.update_applied = True
 
                 logger.info("update_applied", previous=previous_head[:7])
 
@@ -139,13 +149,13 @@ class AutoUpdater:
                     await self.send_message(self.admin_phone,
                                             "Update applied successfully. Restarting...")
 
-                # Schedule exit via a proper async task (not call_later which
-                # can swallow SystemExit inside the event loop callback machinery)
-                async def _delayed_exit():
-                    await asyncio.sleep(2)
-                    raise SystemExit(EXIT_CODE_UPDATE)
-
-                asyncio.create_task(_delayed_exit())
+                # Trigger shutdown — prefer graceful callback, fall back to hard exit
+                if self._shutdown_callback:
+                    self._shutdown_callback()
+                else:
+                    import os as _os  # local import — only needed for fallback exit
+                    loop = asyncio.get_running_loop()
+                    loop.call_later(2, _os._exit, EXIT_CODE_UPDATE)
                 return "Update applied. Restarting..."
 
             except subprocess.CalledProcessError as e:
@@ -185,6 +195,24 @@ class AutoUpdater:
                     await self.send_message(self.admin_phone,
                                             f"Update failed and rolled back: {error_msg}")
                 return error_msg
+
+    async def _run_post_update_hooks(self):
+        """Run post-update scripts (e.g., signal-cli patches). Non-fatal on failure."""
+        script = self.repo_dir / "scripts" / "apply-signal-patches.sh"
+        if not script.exists():
+            return
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run, ["bash", str(script), str(self.repo_dir)],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                logger.warning("post_update_hook_failed",
+                               stderr=result.stderr[:500])
+            else:
+                logger.info("post_update_hook_success")
+        except Exception as e:
+            logger.warning("post_update_hook_error", error=str(e))
 
     async def _rollback(self, previous_head: str):
         """Rollback to a previous commit."""
