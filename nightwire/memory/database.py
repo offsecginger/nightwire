@@ -15,7 +15,7 @@ Module-level functions:
     initialize_database() -- creates, initializes, and returns
         the global singleton.
 
-Schema version: 4 (auto-migrated on startup).
+Schema version: 5 (auto-migrated on startup).
 """
 
 import asyncio

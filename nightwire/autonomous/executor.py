@@ -292,6 +292,7 @@ class TaskExecutor:
         self,
         task: Task,
         progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        agent_definitions: Optional[str] = None,
     ) -> TaskExecutionResult:
         """Execute a task with fresh Claude context and adaptive effort.
 
@@ -389,6 +390,7 @@ class TaskExecutor:
                 timeout=self.config.claude_timeout,
                 progress_callback=progress_callback,
                 memory_context=None,  # Context already in prompt
+                agent_definitions=agent_definitions,
             )
             # Capture usage immediately before any subsequent call overwrites
             if runner.last_usage:
@@ -467,6 +469,7 @@ class TaskExecutor:
                                     verification_result=verification_result,
                                     original_output=output,
                                     progress_callback=progress_callback,
+                                    agent_definitions=agent_definitions,
                                 )
                             )
                             usage_records.extend(fix_usage)
@@ -585,6 +588,7 @@ class TaskExecutor:
         verification_result,
         original_output: str,
         progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        agent_definitions: Optional[str] = None,
     ) -> tuple:
         """Attempt to auto-fix issues found by verification.
 
@@ -622,6 +626,7 @@ class TaskExecutor:
                     prompt=fix_prompt,
                     timeout=min(self.config.claude_timeout, 600),
                     memory_context=None,
+                    agent_definitions=agent_definitions,
                 )
                 # Capture usage before close()
                 if fix_runner.last_usage:

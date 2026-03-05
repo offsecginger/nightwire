@@ -596,6 +596,50 @@ class Config:
         return int(self.settings.get("attachment_max_age_hours", 24))
 
     @property
+    def signal_send_rate_per_second(self) -> float:
+        """Max messages per second per recipient. Default 1.0.
+
+        Controls the rate limiter in the message send queue. Each
+        recipient is rate-limited independently.
+
+        Configurable via ``signal_send_rate_per_second`` in settings.yaml.
+        """
+        return max(0.01, float(self.settings.get("signal_send_rate_per_second", 1.0)))
+
+    @property
+    def signal_send_timeout_seconds(self) -> int:
+        """HTTP timeout for Signal send requests in seconds. Default 10.
+
+        Configurable via ``signal_send_timeout_seconds`` in settings.yaml.
+        """
+        return int(self.settings.get("signal_send_timeout_seconds", 10))
+
+    @property
+    def signal_send_max_retries(self) -> int:
+        """Max retry attempts for failed sends. Default 3.
+
+        Uses exponential backoff (1s, 2s, 4s). After exhaustion the
+        message is dropped and logged at error level.
+
+        Configurable via ``signal_send_max_retries`` in settings.yaml.
+        """
+        return int(self.settings.get("signal_send_max_retries", 3))
+
+    @property
+    def signal_notification_debounce_seconds(self) -> float:
+        """Debounce interval for autonomous notifications. Default 2.0.
+
+        Status notifications from the autonomous loop are buffered and
+        combined into a single message after this many seconds of quiet.
+
+        Configurable via ``signal_notification_debounce_seconds`` in
+        settings.yaml.
+        """
+        return float(
+            self.settings.get("signal_notification_debounce_seconds", 2.0)
+        )
+
+    @property
     def sandbox_enabled(self) -> bool:
         """Whether Docker sandbox is enabled for task execution."""
         sandbox_config = self.settings.get("sandbox", {})

@@ -268,6 +268,11 @@ class QualityGateRunner:
             return (passed, total, passed_count, failed_count, output[-2000:])
 
         except asyncio.TimeoutError:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
             logger.warning("test_timeout", timeout=self.test_timeout)
             return (False, 0, 0, 0, f"Test timeout exceeded ({self.test_timeout}s)")
         except FileNotFoundError as e:
@@ -309,6 +314,11 @@ class QualityGateRunner:
             return (passed, output[-1500:])
 
         except asyncio.TimeoutError:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
             logger.warning("typecheck_timeout", timeout=self.typecheck_timeout)
             return (False, f"Typecheck timeout exceeded ({self.typecheck_timeout}s)")
         except FileNotFoundError as e:
@@ -347,6 +357,11 @@ class QualityGateRunner:
             return (passed, output[-1000:])
 
         except asyncio.TimeoutError:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
             return (False, f"Lint timeout exceeded ({self.lint_timeout}s)")
         except FileNotFoundError:
             return None

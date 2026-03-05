@@ -194,6 +194,8 @@ class ClaudeRunner:
         json_schema: Optional[str] = None,
         verbose: bool = False,
         resume_session_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_definitions: Optional[str] = None,
     ) -> list:
         """Build the ``claude -p`` command with appropriate flags.
 
@@ -203,10 +205,22 @@ class ClaudeRunner:
             verbose: Whether to include verbose event output.
             resume_session_id: Optional session ID to resume a previous
                 conversation via ``--resume``.
+            agent_name: Optional agent name to dispatch via ``--agent``.
+                References a ``.claude/agents/{name}.md`` file.
+            agent_definitions: Optional JSON string defining inline agents
+                via ``--agents``. Format: ``'{"name": {"description": "...",
+                "prompt": "..."}}'``.
 
         Returns:
             List of command-line arguments.
+
+        Raises:
+            ValueError: If both agent_name and agent_definitions are provided.
         """
+        if agent_name and agent_definitions:
+            raise ValueError(
+                "Cannot specify both agent_name and agent_definitions"
+            )
         cmd = [
             self.config.claude_path, "-p",
             "--output-format", output_format,
@@ -233,6 +247,11 @@ class ClaudeRunner:
                 "--append-system-prompt-file",
                 str(guidelines),
             ])
+        # Agent dispatch flags (M15 spike)
+        if agent_name:
+            cmd.extend(["--agent", agent_name])
+        if agent_definitions:
+            cmd.extend(["--agents", agent_definitions])
         return cmd
 
     def _build_prompt(
@@ -358,6 +377,8 @@ class ClaudeRunner:
         project_path: Optional[Path] = None,
         stream: bool = False,
         resume_session_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_definitions: Optional[str] = None,
     ) -> Tuple[bool, str]:
         """Run Claude with the given prompt, retrying on transient errors.
 
@@ -376,6 +397,9 @@ class ClaudeRunner:
             stream: If True, stream text chunks via progress_callback.
             resume_session_id: Optional CLI session ID to resume
                 a prior conversation via ``--resume``.
+            agent_name: Optional agent name for ``--agent`` dispatch.
+            agent_definitions: Optional JSON string for ``--agents``
+                inline agent definitions.
 
         Returns:
             Tuple of (success: bool, output: str).
@@ -424,6 +448,8 @@ class ClaudeRunner:
                 inv_state=inv_state,
                 effective_project=effective_project,
                 resume_session_id=resume_session_id,
+                agent_name=agent_name,
+                agent_definitions=agent_definitions,
             )
             # Extract session_id and usage before invocation cleanup
             success, output = result
@@ -451,6 +477,8 @@ class ClaudeRunner:
         inv_state: _InvocationState,
         effective_project: Path,
         resume_session_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_definitions: Optional[str] = None,
     ) -> Tuple[bool, str]:
         """Core retry loop, isolated with per-invocation state."""
         from .rate_limit_cooldown import get_cooldown_manager
@@ -493,6 +521,8 @@ class ClaudeRunner:
                         inv_state=inv_state,
                         effective_project=effective_project,
                         resume_session_id=resume_session_id,
+                        agent_name=agent_name,
+                        agent_definitions=agent_definitions,
                     )
                 )
             else:
@@ -504,6 +534,8 @@ class ClaudeRunner:
                         inv_state=inv_state,
                         effective_project=effective_project,
                         resume_session_id=resume_session_id,
+                        agent_name=agent_name,
+                        agent_definitions=agent_definitions,
                     )
                 )
 
@@ -561,6 +593,8 @@ class ClaudeRunner:
         effective_project: Optional[Path] = None,
         json_schema: Optional[str] = None,
         resume_session_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_definitions: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[ErrorCategory]]:
         """Execute a single CLI subprocess call (non-streaming).
 
@@ -589,6 +623,8 @@ class ClaudeRunner:
             output_format="json",
             json_schema=json_schema,
             resume_session_id=resume_session_id,
+            agent_name=agent_name,
+            agent_definitions=agent_definitions,
         )
 
         # Wrap in Docker sandbox if enabled
@@ -802,6 +838,8 @@ class ClaudeRunner:
         inv_state: _InvocationState,
         effective_project: Optional[Path] = None,
         resume_session_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        agent_definitions: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[ErrorCategory]]:
         """Execute CLI with streaming NDJSON output.
 
@@ -818,6 +856,8 @@ class ClaudeRunner:
         cmd = self._build_command(
             output_format="stream-json", verbose=True,
             resume_session_id=resume_session_id,
+            agent_name=agent_name,
+            agent_definitions=agent_definitions,
         )
 
         # Wrap in Docker sandbox if enabled
@@ -1067,6 +1107,8 @@ class ClaudeRunner:
         memory_context: Optional[str] = None,
         max_retries: int = MAX_RETRIES,
         project_path: Optional[Path] = None,
+        agent_name: Optional[str] = None,
+        agent_definitions: Optional[str] = None,
     ) -> Tuple[bool, Union[T, str]]:
         """Run Claude with structured JSON output via --json-schema.
 
@@ -1081,6 +1123,9 @@ class ClaudeRunner:
             memory_context: Optional memory context to inject.
             max_retries: Max retries for transient failures.
             project_path: Explicit project path override.
+            agent_name: Optional agent name for ``--agent`` dispatch.
+            agent_definitions: Optional JSON string for ``--agents``
+                inline agent definitions.
 
         Returns:
             Tuple of (success: bool, result: T | str).
@@ -1129,6 +1174,8 @@ class ClaudeRunner:
                 max_retries=max_retries,
                 inv_state=inv_state,
                 effective_project=effective_project,
+                agent_name=agent_name,
+                agent_definitions=agent_definitions,
             )
             # Propagate usage (even on failure)
             self._last_usage = inv_state._last_usage
@@ -1145,6 +1192,8 @@ class ClaudeRunner:
         max_retries: int,
         inv_state: _InvocationState,
         effective_project: Path,
+        agent_name: Optional[str] = None,
+        agent_definitions: Optional[str] = None,
     ) -> Tuple[bool, Union[T, str]]:
         """Core retry loop for run_claude_structured."""
         from .rate_limit_cooldown import get_cooldown_manager
@@ -1168,6 +1217,8 @@ class ClaudeRunner:
                     inv_state=inv_state,
                     effective_project=effective_project,
                     json_schema=json_schema,
+                    agent_name=agent_name,
+                    agent_definitions=agent_definitions,
                 )
             )
 

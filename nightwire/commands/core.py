@@ -442,6 +442,7 @@ class CoreCommandHandler(BaseCommandHandler):
         if busy:
             return busy
 
+        await self.ctx.send_typing_indicator(sender, True)
         await self.ctx.send_message(sender, "Analyzing project...")
         self.ctx.task_manager.start_background_task(
             sender,
@@ -486,6 +487,7 @@ class CoreCommandHandler(BaseCommandHandler):
         if busy:
             return busy
 
+        await self.ctx.send_typing_indicator(sender, True)
         await self.ctx.send_message(sender, "Working on it...")
         self.ctx.task_manager.start_background_task(
             sender, args, current_project,
@@ -525,6 +527,7 @@ class CoreCommandHandler(BaseCommandHandler):
         if busy:
             return busy
 
+        await self.ctx.send_typing_indicator(sender, True)
         await self.ctx.send_message(
             sender, "Creating PRD and breaking into autonomous tasks..."
         )
@@ -572,6 +575,7 @@ class CoreCommandHandler(BaseCommandHandler):
         if busy:
             return busy
 
+        await self.ctx.send_typing_indicator(sender, True)
         await self.ctx.send_message(sender, "Generating summary...")
         self.ctx.task_manager.start_background_task(
             sender,

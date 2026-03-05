@@ -66,6 +66,7 @@ class BotContext:
     memory_commands: "MemoryCommands"
     plugin_loader: "PluginLoader"
     send_message: Callable[[str, str], Awaitable[None]]
+    send_typing_indicator: Callable[[str, bool], Awaitable[None]]
     task_manager: "TaskManager"
     get_memory_context: Callable[..., Awaitable[Optional[str]]]
     # Set after registry creation — used by /help <command>

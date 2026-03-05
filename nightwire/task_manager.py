@@ -40,7 +40,10 @@ class TaskManager:
         memory,
         config,
         send_message: Callable[[str, str], Awaitable[None]],
+        send_typing_indicator: Callable[[str, bool], Awaitable[None]],
         get_memory_context: Callable[..., Awaitable[Optional[str]]],
+        get_agent_catalog: Callable[[], str] = lambda: "",
+        get_agent_definitions: Callable[[], Optional[str]] = lambda: None,
     ):
         """Initialize the task manager.
 
@@ -50,15 +53,24 @@ class TaskManager:
             memory: MemoryManager for context and storage.
             config: Config instance for timeouts and settings.
             send_message: Async callback to send Signal messages.
+            send_typing_indicator: Async callback to send/clear
+                typing indicators. Best-effort, never blocks.
             get_memory_context: Async callback to build memory
                 context for a sender/prompt/project triple.
+            get_agent_catalog: Callback returning the plugin agent
+                catalog prompt string. Empty string when no agents.
+            get_agent_definitions: Callback returning agent definitions
+                JSON for ``--agents`` CLI flag. None when no agents.
         """
         self.runner = runner
         self.project_manager = project_manager
         self.memory = memory
         self.config = config
         self._send_message = send_message
+        self._send_typing_indicator = send_typing_indicator
         self._get_memory_context = get_memory_context
+        self._get_agent_catalog = get_agent_catalog
+        self._get_agent_definitions = get_agent_definitions
         self._sender_tasks: Dict[Tuple[str, str], dict] = {}
         # Per-user+project session IDs for Claude CLI --resume.
         # Keys are "sender:project_name", values are CLI session_id.
@@ -212,6 +224,7 @@ class TaskManager:
         self._sender_tasks[(sender, project_name or "")] = task_state
 
         async def run_task():
+            await self._send_typing_indicator(sender, True)
             try:
                 async def progress_cb(msg: str):
                     task_state["step"] = msg
@@ -221,6 +234,17 @@ class TaskManager:
                 memory_context = await self._get_memory_context(
                     sender, task_description, project_name
                 )
+
+                # Append plugin agent catalog if available (M11)
+                agent_catalog = self._get_agent_catalog()
+                if agent_catalog:
+                    if memory_context:
+                        memory_context = memory_context + "\n\n" + agent_catalog
+                    else:
+                        memory_context = agent_catalog
+
+                # Get agent definitions JSON for --agents flag (M15.2)
+                agent_defs = self._get_agent_definitions()
 
                 task_state["step"] = "Claude executing task..."
                 task_project_path = self.project_manager.get_current_path(sender)
@@ -242,6 +266,7 @@ class TaskManager:
                     project_path=task_project_path,
                     stream=True,
                     resume_session_id=resume_id,
+                    agent_definitions=agent_defs,
                 )
                 # Record usage (fire-and-forget)
                 t_usage = asyncio.create_task(
@@ -307,6 +332,7 @@ class TaskManager:
                 )
                 await self._send_message(sender, "Task failed due to an internal error.")
             finally:
+                await self._send_typing_indicator(sender, False)
                 self._sender_tasks.pop((sender, project_name or ""), None)
 
         task_state["task"] = asyncio.create_task(run_task())
@@ -398,6 +424,11 @@ class TaskManager:
             logger.info("interrupted_tasks_saved", count=len(active))
         except Exception as e:
             logger.warning("interrupted_tasks_save_failed", error=str(e))
+            try:
+                import os as _os
+                _os.unlink(tmp)
+            except OSError:
+                pass
 
     async def notify_interrupted_tasks(self, data_dir: Path) -> None:
         """Read interrupted_tasks.json and notify users on startup.

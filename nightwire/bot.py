@@ -37,6 +37,7 @@ from .commands.base import BotContext, HandlerRegistry
 from .commands.core import CoreCommandHandler, get_memory_context
 from .config import get_config
 from .memory import MemoryCommands, MemoryManager
+from .message_queue import MessageQueue
 from .plugin_loader import PluginLoader
 from .project_manager import get_project_manager
 from .rate_limit_cooldown import get_cooldown_manager
@@ -108,6 +109,7 @@ class SignalBot:
         self._attachment_cleanup_task: Optional[asyncio.Task] = None
         self._ws_frames_received: int = 0
         self._startup_notified: bool = False
+        self._message_queue: Optional[MessageQueue] = None
 
         # Memory system
         memory_db_path = Path(self.config.config_dir).parent / "data" / "memory.db"
@@ -154,7 +156,10 @@ class SignalBot:
             memory=self.memory,
             config=self.config,
             send_message=self._send_message,
+            send_typing_indicator=self._send_typing_indicator,
             get_memory_context=get_mem_ctx,
+            get_agent_catalog=self.plugin_loader.get_agent_catalog_prompt,
+            get_agent_definitions=self.plugin_loader.get_agent_definitions_json,
         )
 
         # BotContext — dependency container for handlers
@@ -166,6 +171,7 @@ class SignalBot:
             memory_commands=self.memory_commands,
             plugin_loader=self.plugin_loader,
             send_message=self._send_message,
+            send_typing_indicator=self._send_typing_indicator,
             task_manager=self.task_manager,
             get_memory_context=get_mem_ctx,
             nightwire_runner=self.nightwire_runner,
@@ -204,6 +210,15 @@ class SignalBot:
         # Get the registered account
         await self._get_account()
 
+        # Initialize message send queue (requires session + account)
+        if self.account:
+            self._message_queue = MessageQueue(
+                session=self.session,
+                config=self.config,
+                signal_api_url=self.config.signal_api_url,
+                account=self.account,
+            )
+
         # Initialize memory system
         await self.memory.initialize()
 
@@ -241,6 +256,8 @@ class SignalBot:
             run_quality_gates=self.config.autonomous_quality_gates,
             max_parallel=self.config.autonomous_max_parallel,
             usage_recorder=autonomous_usage_recorder,
+            debounce_seconds=self.config.signal_notification_debounce_seconds,
+            get_agent_definitions=self.plugin_loader.get_agent_definitions_json,
         )
         self.autonomous_commands = AutonomousCommands(
             manager=self.autonomous_manager,
@@ -402,6 +419,9 @@ class SignalBot:
         await self.task_manager.cancel_all_tasks(
             reason="service shutting down",
         )
+        # Drain message queue before closing the HTTP session
+        if self._message_queue:
+            await self._message_queue.close()
         # Now safe to close network and database resources
         if self.session:
             await self.session.close()
@@ -502,6 +522,9 @@ class SignalBot:
 
         Messages are prefixed with ``[instance_name]`` and split at
         paragraph/line boundaries if they exceed 5000 characters.
+        When the message queue is active, messages are enqueued for
+        rate-limited delivery. Before queue initialization, falls
+        back to direct HTTP POST.
         """
         if not self.account:
             logger.warning("send_no_account", msg="Cannot send — no Signal account registered")
@@ -518,20 +541,39 @@ class SignalBot:
                 label = f"{prefix} [{i + 1}/{total}] "
             else:
                 label = f"{prefix} "
-            payload = {
-                "message": label + part,
-                "number": self.account,
-                "recipients": [recipient],
-            }
-            try:
-                url = f"{self.config.signal_api_url}/v2/send"
-                async with self.session.post(url, json=payload) as resp:
-                    if resp.status != 201:
-                        body = await resp.text()
-                        logger.warning("send_failed", status=resp.status,
-                                        body=body[:200])
-            except Exception as e:
-                logger.error("send_error", error=str(e))
+            full_message = label + part
+            if self._message_queue:
+                await self._message_queue.enqueue(recipient, full_message)
+            else:
+                # Fallback: direct HTTP before queue initialization
+                payload = {
+                    "message": full_message,
+                    "number": self.account,
+                    "recipients": [recipient],
+                }
+                try:
+                    url = f"{self.config.signal_api_url}/v2/send"
+                    async with self.session.post(url, json=payload) as resp:
+                        if resp.status != 201:
+                            body = await resp.text()
+                            logger.warning(
+                                "send_failed", status=resp.status,
+                                body=body[:200],
+                            )
+                except Exception as e:
+                    logger.error("send_error", error=str(e))
+
+    async def _send_typing_indicator(
+        self, recipient: str, typing: bool = True
+    ):
+        """Send typing indicator via message queue. Best-effort.
+
+        Args:
+            recipient: Phone number or UUID.
+            typing: True to start typing, False to clear.
+        """
+        if self._message_queue:
+            await self._message_queue.send_typing_indicator(recipient, typing)
 
     async def _handle_command(
         self, command: str, args: str, sender: str, image_paths=None
@@ -760,6 +802,7 @@ class SignalBot:
 
     async def _handle_signal_message(self, msg: dict):
         """Handle a message from Signal API."""
+        source = None
         try:
             envelope = msg.get("envelope", {})
             source = (

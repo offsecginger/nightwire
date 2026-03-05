@@ -52,6 +52,8 @@ class AutonomousManager:
         run_quality_gates: bool = True,
         max_parallel: int = 3,
         usage_recorder: Optional[Callable[..., Awaitable[None]]] = None,
+        debounce_seconds: float = 2.0,
+        get_agent_definitions: Callable[[], Optional[str]] = lambda: None,
     ):
         """
         Initialize the autonomous manager.
@@ -63,6 +65,9 @@ class AutonomousManager:
             run_quality_gates: Whether to run tests/typecheck after tasks
             max_parallel: Maximum concurrent task workers (default 3, max 10)
             usage_recorder: Async callback to record usage data per task.
+            debounce_seconds: Window for batching status notifications per recipient.
+            get_agent_definitions: Callback returning agent definitions JSON
+                for ``--agents`` CLI flag. None when no agents.
         """
         self.db = AutonomousDatabase(db_connection)
         self.quality_runner = QualityGateRunner()
@@ -80,6 +85,8 @@ class AutonomousManager:
             poll_interval=poll_interval,
             max_parallel=max_parallel,
             usage_recorder=usage_recorder,
+            debounce_seconds=debounce_seconds,
+            get_agent_definitions=get_agent_definitions,
         )
 
         self._progress_callback = progress_callback

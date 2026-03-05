@@ -82,7 +82,7 @@ Send `/complex Add user authentication with JWT tokens` and Nightwire will:
 
 ```bash
 # Clone the repository
-git clone https://github.com/hackingdave/nightwire.git
+git clone https://github.com/offsecginger/nightwire.git
 cd nightwire
 
 # Run the installer
@@ -334,10 +334,18 @@ nightwire_assistant:
   model: "morpheus-latest"
 ```
 
-### System
+### System & Monitoring
 
 | Command | Description |
 |---------|-------------|
+| `/diagnose` | Run health checks (Claude CLI, Signal API, SQLite, embeddings, Docker) |
+| `/usage` | Show your token usage and cost summary (today, this week, all time) |
+| `/usage project` | Show per-project usage breakdown |
+| `/usage all` | Show all users' usage (admin only, phone numbers masked) |
+| `/monitor` | Show autonomous loop status: workers, queue depth, errors, circuit breakers |
+| `/worker list` | List active autonomous workers |
+| `/worker stop <id>` | Cancel a specific autonomous worker |
+| `/worker restart <id>` | Re-queue a failed task for retry |
 | `/cooldown` | Show current rate limit cooldown status |
 | `/cooldown clear` | Manually end an active cooldown and resume operations |
 | `/cooldown test` | Activate a 2-minute test cooldown (for verification) |

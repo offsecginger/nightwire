@@ -14,6 +14,7 @@ Classes:
 import asyncio
 import json
 import sqlite3
+import threading
 from datetime import datetime
 from typing import Any, List, Optional
 
@@ -60,6 +61,7 @@ class AutonomousDatabase:
         """
         self._conn = conn
         self._conn.row_factory = sqlite3.Row
+        self._lock = threading.Lock()
 
     def _parse_timestamp(self, ts_str: Optional[str]) -> Optional[datetime]:
         """Parse SQLite timestamp format."""
@@ -122,20 +124,22 @@ class AutonomousDatabase:
         status: PRDStatus,
         metadata: Optional[dict[str, Any]],
     ) -> PRD:
-        cursor = self._conn.cursor()
-        metadata_json = json.dumps(metadata) if metadata else None
+        with self._lock:
+            cursor = self._conn.cursor()
+            metadata_json = json.dumps(metadata) if metadata else None
 
-        cursor.execute(
-            """
-            INSERT INTO prds (phone_number, project_name, title, description, status, metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """,
-            (phone_number, project_name, title, description, status.value, metadata_json),
-        )
-        self._conn.commit()
+            cursor.execute(
+                """
+                INSERT INTO prds (phone_number, project_name, title, description, status, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+                (phone_number, project_name, title, description, status.value, metadata_json),
+            )
+            self._conn.commit()
+            prd_id = cursor.lastrowid
 
         return PRD(
-            id=cursor.lastrowid,
+            id=prd_id,
             phone_number=phone_number,
             project_name=project_name,
             title=title,
@@ -275,22 +279,23 @@ class AutonomousDatabase:
         await asyncio.to_thread(self._update_prd_status_sync, prd_id, status)
 
     def _update_prd_status_sync(self, prd_id: int, status: PRDStatus) -> None:
-        cursor = self._conn.cursor()
-        completed_at = (
-            self._format_timestamp(datetime.now())
-            if status == PRDStatus.COMPLETED
-            else None
-        )
+        with self._lock:
+            cursor = self._conn.cursor()
+            completed_at = (
+                self._format_timestamp(datetime.now())
+                if status == PRDStatus.COMPLETED
+                else None
+            )
 
-        cursor.execute(
-            """
-            UPDATE prds
-            SET status = ?, updated_at = CURRENT_TIMESTAMP, completed_at = ?
-            WHERE id = ?
-        """,
-            (status.value, completed_at, prd_id),
-        )
-        self._conn.commit()
+            cursor.execute(
+                """
+                UPDATE prds
+                SET status = ?, updated_at = CURRENT_TIMESTAMP, completed_at = ?
+                WHERE id = ?
+            """,
+                (status.value, completed_at, prd_id),
+            )
+            self._conn.commit()
 
     # ========== Story Operations ==========
 
@@ -342,40 +347,42 @@ class AutonomousDatabase:
         priority: int,
         metadata: Optional[dict[str, Any]],
     ) -> Story:
-        cursor = self._conn.cursor()
+        with self._lock:
+            cursor = self._conn.cursor()
 
-        # Get next story order
-        cursor.execute(
-            "SELECT COALESCE(MAX(story_order), -1) + 1 FROM stories WHERE prd_id = ?",
-            (prd_id,),
-        )
-        story_order = cursor.fetchone()[0]
+            # Get next story order
+            cursor.execute(
+                "SELECT COALESCE(MAX(story_order), -1) + 1 FROM stories WHERE prd_id = ?",
+                (prd_id,),
+            )
+            story_order = cursor.fetchone()[0]
 
-        ac_json = json.dumps(acceptance_criteria) if acceptance_criteria else None
-        metadata_json = json.dumps(metadata) if metadata else None
+            ac_json = json.dumps(acceptance_criteria) if acceptance_criteria else None
+            metadata_json = json.dumps(metadata) if metadata else None
 
-        cursor.execute(
-            """
-            INSERT INTO stories
-            (prd_id, phone_number, title, description,
-             acceptance_criteria, priority, story_order, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-            (
-                prd_id,
-                phone_number,
-                title,
-                description,
-                ac_json,
-                priority,
-                story_order,
-                metadata_json,
-            ),
-        )
-        self._conn.commit()
+            cursor.execute(
+                """
+                INSERT INTO stories
+                (prd_id, phone_number, title, description,
+                 acceptance_criteria, priority, story_order, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    prd_id,
+                    phone_number,
+                    title,
+                    description,
+                    ac_json,
+                    priority,
+                    story_order,
+                    metadata_json,
+                ),
+            )
+            self._conn.commit()
+            story_id = cursor.lastrowid
 
         return Story(
-            id=cursor.lastrowid,
+            id=story_id,
             prd_id=prd_id,
             phone_number=phone_number,
             title=title,
@@ -405,7 +412,8 @@ class AutonomousDatabase:
             SELECT s.*,
                    COUNT(t.id) as total_tasks,
                    SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
-                   SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) as failed_tasks
+                   SUM(CASE WHEN t.status IN ('failed', 'cancelled', 'blocked')
+                       THEN 1 ELSE 0 END) as failed_tasks
             FROM stories s
             LEFT JOIN tasks t ON t.story_id = s.id
             WHERE s.id = ?
@@ -474,7 +482,8 @@ class AutonomousDatabase:
             SELECT s.*,
                    COUNT(t.id) as total_tasks,
                    SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
-                   SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) as failed_tasks
+                   SUM(CASE WHEN t.status IN ('failed', 'cancelled', 'blocked')
+                       THEN 1 ELSE 0 END) as failed_tasks
             FROM stories s
             LEFT JOIN tasks t ON t.story_id = s.id
             WHERE 1=1
@@ -535,22 +544,23 @@ class AutonomousDatabase:
         await asyncio.to_thread(self._update_story_status_sync, story_id, status)
 
     def _update_story_status_sync(self, story_id: int, status: StoryStatus) -> None:
-        cursor = self._conn.cursor()
-        completed_at = (
-            self._format_timestamp(datetime.now())
-            if status == StoryStatus.COMPLETED
-            else None
-        )
+        with self._lock:
+            cursor = self._conn.cursor()
+            completed_at = (
+                self._format_timestamp(datetime.now())
+                if status == StoryStatus.COMPLETED
+                else None
+            )
 
-        cursor.execute(
-            """
-            UPDATE stories
-            SET status = ?, updated_at = CURRENT_TIMESTAMP, completed_at = ?
-            WHERE id = ?
-        """,
-            (status.value, completed_at, story_id),
-        )
-        self._conn.commit()
+            cursor.execute(
+                """
+                UPDATE stories
+                SET status = ?, updated_at = CURRENT_TIMESTAMP, completed_at = ?
+                WHERE id = ?
+            """,
+                (status.value, completed_at, story_id),
+            )
+            self._conn.commit()
 
     # ========== Task Operations ==========
 
@@ -619,41 +629,43 @@ class AutonomousDatabase:
         task_type: Optional[str] = None,
         effort_level: Optional[str] = None,
     ) -> Task:
-        cursor = self._conn.cursor()
+        with self._lock:
+            cursor = self._conn.cursor()
 
-        # Get next task order
-        cursor.execute(
-            "SELECT COALESCE(MAX(task_order), -1) + 1 FROM tasks WHERE story_id = ?",
-            (story_id,),
-        )
-        task_order = cursor.fetchone()[0]
+            # Get next task order
+            cursor.execute(
+                "SELECT COALESCE(MAX(task_order), -1) + 1 FROM tasks WHERE story_id = ?",
+                (story_id,),
+            )
+            task_order = cursor.fetchone()[0]
 
-        metadata_json = json.dumps(metadata) if metadata else None
-        depends_on_json = json.dumps(depends_on) if depends_on is not None else None
+            metadata_json = json.dumps(metadata) if metadata else None
+            depends_on_json = json.dumps(depends_on) if depends_on is not None else None
 
-        cursor.execute(
-            """
-            INSERT INTO tasks
-            (story_id, phone_number, project_name, title, description, priority, task_order,
-             max_retries, metadata, depends_on, task_type, effort_level)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-            (
-                story_id,
-                phone_number,
-                project_name,
-                title,
-                description,
-                priority,
-                task_order,
-                max_retries,
-                metadata_json,
-                depends_on_json,
-                task_type,
-                effort_level,
-            ),
-        )
-        self._conn.commit()
+            cursor.execute(
+                """
+                INSERT INTO tasks
+                (story_id, phone_number, project_name, title, description, priority, task_order,
+                 max_retries, metadata, depends_on, task_type, effort_level)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    story_id,
+                    phone_number,
+                    project_name,
+                    title,
+                    description,
+                    priority,
+                    task_order,
+                    max_retries,
+                    metadata_json,
+                    depends_on_json,
+                    task_type,
+                    effort_level,
+                ),
+            )
+            self._conn.commit()
+            task_id_val = cursor.lastrowid
 
         # Convert string values to enums for the Task model, matching _row_to_task() behavior
         effort_level_enum = None
@@ -671,7 +683,7 @@ class AutonomousDatabase:
                 pass
 
         return Task(
-            id=cursor.lastrowid,
+            id=task_id_val,
             story_id=story_id,
             phone_number=phone_number,
             project_name=project_name,
@@ -916,81 +928,82 @@ class AutonomousDatabase:
         files_changed: Optional[List[str]],
         quality_gate_results: Optional[QualityGateResult],
     ) -> None:
-        cursor = self._conn.cursor()
+        with self._lock:
+            cursor = self._conn.cursor()
 
-        files_json = json.dumps(files_changed) if files_changed else None
-        qg_json = (
-            json.dumps(quality_gate_results.model_dump())
-            if quality_gate_results
-            else None
-        )
+            files_json = json.dumps(files_changed) if files_changed else None
+            qg_json = (
+                json.dumps(quality_gate_results.model_dump())
+                if quality_gate_results
+                else None
+            )
 
-        # When requeueing for retry, clear execution-specific fields so stale
-        # data from the previous attempt doesn't persist via COALESCE.
-        if status == TaskStatus.QUEUED:
-            cursor.execute(
-                """
-                UPDATE tasks
-                SET status = ?,
-                    started_at = NULL,
-                    completed_at = NULL,
-                    error_message = ?,
-                    claude_output = NULL,
-                    files_changed = NULL,
-                    quality_gate_results = NULL
-                WHERE id = ?
-            """,
-                (status.value, error_message, task_id),
-            )
-        elif status == TaskStatus.COMPLETED:
-            # Clear stale error_message on successful completion
-            cursor.execute(
-                """
-                UPDATE tasks
-                SET status = ?,
-                    started_at = COALESCE(?, started_at),
-                    completed_at = COALESCE(?, completed_at),
-                    error_message = NULL,
-                    claude_output = COALESCE(?, claude_output),
-                    files_changed = COALESCE(?, files_changed),
-                    quality_gate_results = COALESCE(?, quality_gate_results)
-                WHERE id = ?
-            """,
-                (
-                    status.value,
-                    self._format_timestamp(started_at),
-                    self._format_timestamp(completed_at),
-                    claude_output,
-                    files_json,
-                    qg_json,
-                    task_id,
-                ),
-            )
-        else:
-            cursor.execute(
-                """
-                UPDATE tasks
-                SET status = ?,
-                    started_at = COALESCE(?, started_at),
-                    completed_at = COALESCE(?, completed_at),
-                    error_message = COALESCE(?, error_message),
-                    claude_output = COALESCE(?, claude_output),
-                    files_changed = COALESCE(?, files_changed),
-                    quality_gate_results = COALESCE(?, quality_gate_results)
-                WHERE id = ?
-            """,
-                (
-                    status.value,
-                    self._format_timestamp(started_at),
-                    self._format_timestamp(completed_at),
-                    error_message,
-                    claude_output,
-                    files_json,
-                    qg_json,
-                    task_id,
-                ),
-            )
-        self._conn.commit()
+            # When requeueing for retry, clear execution-specific fields so stale
+            # data from the previous attempt doesn't persist via COALESCE.
+            if status == TaskStatus.QUEUED:
+                cursor.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?,
+                        started_at = NULL,
+                        completed_at = NULL,
+                        error_message = ?,
+                        claude_output = NULL,
+                        files_changed = NULL,
+                        quality_gate_results = NULL
+                    WHERE id = ?
+                """,
+                    (status.value, error_message, task_id),
+                )
+            elif status == TaskStatus.COMPLETED:
+                # Clear stale error_message on successful completion
+                cursor.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?,
+                        started_at = COALESCE(?, started_at),
+                        completed_at = COALESCE(?, completed_at),
+                        error_message = NULL,
+                        claude_output = COALESCE(?, claude_output),
+                        files_changed = COALESCE(?, files_changed),
+                        quality_gate_results = COALESCE(?, quality_gate_results)
+                    WHERE id = ?
+                """,
+                    (
+                        status.value,
+                        self._format_timestamp(started_at),
+                        self._format_timestamp(completed_at),
+                        claude_output,
+                        files_json,
+                        qg_json,
+                        task_id,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?,
+                        started_at = COALESCE(?, started_at),
+                        completed_at = COALESCE(?, completed_at),
+                        error_message = COALESCE(?, error_message),
+                        claude_output = COALESCE(?, claude_output),
+                        files_changed = COALESCE(?, files_changed),
+                        quality_gate_results = COALESCE(?, quality_gate_results)
+                    WHERE id = ?
+                """,
+                    (
+                        status.value,
+                        self._format_timestamp(started_at),
+                        self._format_timestamp(completed_at),
+                        error_message,
+                        claude_output,
+                        files_json,
+                        qg_json,
+                        task_id,
+                    ),
+                )
+            self._conn.commit()
 
     async def store_verification_result(
         self, task_id: int, verification: VerificationResult
@@ -1008,13 +1021,14 @@ class AutonomousDatabase:
     def _store_verification_result_sync(
         self, task_id: int, verification: VerificationResult
     ) -> None:
-        cursor = self._conn.cursor()
-        vr_json = json.dumps(verification.model_dump())
-        cursor.execute(
-            "UPDATE tasks SET verification_result = ? WHERE id = ?",
-            (vr_json, task_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.cursor()
+            vr_json = json.dumps(verification.model_dump())
+            cursor.execute(
+                "UPDATE tasks SET verification_result = ? WHERE id = ?",
+                (vr_json, task_id),
+            )
+            self._conn.commit()
 
     async def increment_retry_count(self, task_id: int) -> None:
         """Increment task retry count by 1.
@@ -1025,11 +1039,12 @@ class AutonomousDatabase:
         await asyncio.to_thread(self._increment_retry_count_sync, task_id)
 
     def _increment_retry_count_sync(self, task_id: int) -> None:
-        cursor = self._conn.cursor()
-        cursor.execute(
-            "UPDATE tasks SET retry_count = retry_count + 1 WHERE id = ?", (task_id,)
-        )
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "UPDATE tasks SET retry_count = retry_count + 1 WHERE id = ?", (task_id,)
+            )
+            self._conn.commit()
 
     async def reset_retry_count(self, task_id: int) -> None:
         """Reset task retry count to 0.
@@ -1042,11 +1057,12 @@ class AutonomousDatabase:
         await asyncio.to_thread(self._reset_retry_count_sync, task_id)
 
     def _reset_retry_count_sync(self, task_id: int) -> None:
-        cursor = self._conn.cursor()
-        cursor.execute(
-            "UPDATE tasks SET retry_count = 0 WHERE id = ?", (task_id,)
-        )
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "UPDATE tasks SET retry_count = 0 WHERE id = ?", (task_id,)
+            )
+            self._conn.commit()
 
     async def queue_tasks_for_story(self, story_id: int) -> int:
         """Queue all pending tasks for a story.
@@ -1060,17 +1076,18 @@ class AutonomousDatabase:
         return await asyncio.to_thread(self._queue_tasks_for_story_sync, story_id)
 
     def _queue_tasks_for_story_sync(self, story_id: int) -> int:
-        cursor = self._conn.cursor()
-        cursor.execute(
-            """
-            UPDATE tasks
-            SET status = ?
-            WHERE story_id = ? AND status = ?
-        """,
-            (TaskStatus.QUEUED.value, story_id, TaskStatus.PENDING.value),
-        )
-        self._conn.commit()
-        return cursor.rowcount
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET status = ?
+                WHERE story_id = ? AND status = ?
+            """,
+                (TaskStatus.QUEUED.value, story_id, TaskStatus.PENDING.value),
+            )
+            self._conn.commit()
+            return cursor.rowcount
 
     async def queue_tasks_for_prd(self, prd_id: int) -> int:
         """Queue all pending tasks across all stories in a PRD.
@@ -1084,18 +1101,19 @@ class AutonomousDatabase:
         return await asyncio.to_thread(self._queue_tasks_for_prd_sync, prd_id)
 
     def _queue_tasks_for_prd_sync(self, prd_id: int) -> int:
-        cursor = self._conn.cursor()
-        cursor.execute(
-            """
-            UPDATE tasks
-            SET status = ?
-            WHERE story_id IN (SELECT id FROM stories WHERE prd_id = ?)
-            AND status = ?
-        """,
-            (TaskStatus.QUEUED.value, prd_id, TaskStatus.PENDING.value),
-        )
-        self._conn.commit()
-        return cursor.rowcount
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET status = ?
+                WHERE story_id IN (SELECT id FROM stories WHERE prd_id = ?)
+                AND status = ?
+            """,
+                (TaskStatus.QUEUED.value, prd_id, TaskStatus.PENDING.value),
+            )
+            self._conn.commit()
+            return cursor.rowcount
 
     # ========== Learning Operations ==========
 
@@ -1111,35 +1129,36 @@ class AutonomousDatabase:
         return await asyncio.to_thread(self._store_learning_sync, learning)
 
     def _store_learning_sync(self, learning: Learning) -> int:
-        cursor = self._conn.cursor()
+        with self._lock:
+            cursor = self._conn.cursor()
 
-        keywords_json = (
-            json.dumps(learning.relevance_keywords) if learning.relevance_keywords else None
-        )
-        metadata_json = json.dumps(learning.metadata) if learning.metadata else None
+            keywords_json = (
+                json.dumps(learning.relevance_keywords) if learning.relevance_keywords else None
+            )
+            metadata_json = json.dumps(learning.metadata) if learning.metadata else None
 
-        cursor.execute(
-            """
-            INSERT INTO learnings
-            (phone_number, project_name, task_id, category, title, content,
-             relevance_keywords, confidence, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-            (
-                learning.phone_number,
-                learning.project_name,
-                learning.task_id,
-                learning.category.value,
-                learning.title,
-                learning.content,
-                keywords_json,
-                learning.confidence,
-                metadata_json,
-            ),
-        )
-        self._conn.commit()
+            cursor.execute(
+                """
+                INSERT INTO learnings
+                (phone_number, project_name, task_id, category, title, content,
+                 relevance_keywords, confidence, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    learning.phone_number,
+                    learning.project_name,
+                    learning.task_id,
+                    learning.category.value,
+                    learning.title,
+                    learning.content,
+                    keywords_json,
+                    learning.confidence,
+                    metadata_json,
+                ),
+            )
+            self._conn.commit()
 
-        return cursor.lastrowid
+            return cursor.lastrowid
 
     async def get_learnings(
         self,
@@ -1316,16 +1335,17 @@ class AutonomousDatabase:
         await asyncio.to_thread(self._increment_learning_usage_sync, learning_id)
 
     def _increment_learning_usage_sync(self, learning_id: int) -> None:
-        cursor = self._conn.cursor()
-        cursor.execute(
-            """
-            UPDATE learnings
-            SET usage_count = usage_count + 1, last_used = CURRENT_TIMESTAMP
-            WHERE id = ?
-        """,
-            (learning_id,),
-        )
-        self._conn.commit()
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                UPDATE learnings
+                SET usage_count = usage_count + 1, last_used = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """,
+                (learning_id,),
+            )
+            self._conn.commit()
 
     async def decay_unused_learnings(self, days_threshold: int = 30) -> int:
         """Decay confidence of unused learnings by 10%.
@@ -1344,19 +1364,20 @@ class AutonomousDatabase:
         )
 
     def _decay_unused_learnings_sync(self, days_threshold: int) -> int:
-        cursor = self._conn.cursor()
-        cursor.execute(
-            """
-            UPDATE learnings
-            SET confidence = confidence * 0.9
-            WHERE (last_used IS NULL OR last_used < datetime('now', ?))
-            AND confidence > 0.1
-            AND is_active = 1
-        """,
-            (f"-{days_threshold} days",),
-        )
-        self._conn.commit()
-        return cursor.rowcount
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                UPDATE learnings
+                SET confidence = confidence * 0.9
+                WHERE (last_used IS NULL OR last_used < datetime('now', ?))
+                AND confidence > 0.1
+                AND is_active = 1
+            """,
+                (f"-{days_threshold} days",),
+            )
+            self._conn.commit()
+            return cursor.rowcount
 
     # ========== Statistics ==========
 

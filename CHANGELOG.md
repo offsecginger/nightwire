@@ -5,6 +5,39 @@ All notable changes to nightwire (formerly sidechannel) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.1] - 2026-03-05
+
+### Fixed — Production Readiness Audit
+- `autonomous/loop.py`: Replaced deprecated `asyncio.ensure_future` with `asyncio.get_running_loop().create_task()` — eliminates DeprecationWarning, gracefully handles sync test contexts
+- `autonomous/loop.py`: Added `asyncio.CancelledError` handler in `_process_task` — tasks cancelled during shutdown/stuck detection now correctly transition to CANCELLED status in database (with guard against double-update from `_check_stuck_tasks`)
+- `autonomous/database.py`: Story completion SQL now counts CANCELLED and BLOCKED tasks as terminal — prevents stories from being stuck IN_PROGRESS forever
+- `autonomous/database.py`: Added `threading.Lock` to all 14 write methods — prevents concurrent `OperationalError` when parallel workers write to the shared SQLite connection via `asyncio.to_thread`
+- `README.md`: Fixed clone URL from `hackingdave/nightwire` to `offsecginger/nightwire` (consistent with pyproject.toml)
+- `README.md`: Added missing `/diagnose`, `/usage`, `/monitor`, `/worker` commands to System section
+- `memory/haiku_summarizer.py`: Kill orphaned subprocess on timeout — prevents zombie process accumulation
+- `autonomous/quality_gates.py`: Kill orphaned subprocess on timeout in `_run_tests`, `_run_typecheck`, and `_run_lint` — prevents zombie process accumulation during autonomous pipeline
+- `memory/database.py`: Fixed stale docstring "Schema version: 4" → "5"
+- `SECURITY.md`: Fixed security advisory URL from `hackingdave/nightwire` to `offsecginger/nightwire`
+- `config.py`: Clamp `signal_send_rate_per_second` to minimum 0.01 — prevents `ZeroDivisionError` in message queue consumer
+- `task_manager.py`: Clean up orphaned temp file on `save_interrupted_tasks` failure
+- `bot.py`: Initialize `source = None` before try block in message handler — prevents `UnboundLocalError` on malformed messages
+
+## [3.5.0] - 2026-03-05
+
+### Added — Milestones 10-11, 15
+- **Signal UX (M10)**: Per-recipient message queue with FIFO ordering, rate limiting, retry. Typing indicators. Autonomous notification debounce (critical vs non-critical split).
+- **Plugin Agent System (M11)**: `AgentSpec` declarative registration, `PluginLoader` agent collection and catalog prompt generation, `TaskManager` catalog injection.
+- **SubAgent Spike (M15.1)**: `--agent` and `--agents <json>` CLI flag support in `ClaudeRunner`. Evaluation findings document recommending `--agents <json>` for runtime plugin agent dispatch.
+- **SubAgent Full Impl (M15.2)**: `AgentSpec` migrated to prompt-based model (dropped `handler_fn`). Agent definitions JSON threaded through TaskManager, autonomous pipeline, and `run_claude_structured()`. Plugins define agents that Claude dispatches natively via `--agents <json>`.
+
+### Changed
+- `claude_runner.py`: `agent_name` and `agent_definitions` params threaded through all call chains including `run_claude_structured()`
+- `config.py`: 4 new Signal UX config properties
+- `bot.py`: MessageQueue routing, typing indicator callbacks
+- `autonomous/loop.py`: Notification debounce with 6 debounced + 11 critical call sites
+- `plugin_base.py`, `plugin_loader.py`: AgentSpec, agent collection, catalog generation
+- `task_manager.py`: Agent catalog callback, catalog concatenation
+
 ## [3.2.0] - 2026-02-27
 
 ### Added — Milestone 8: Upstream Feature Port

@@ -177,6 +177,11 @@ class HaikuSummarizer:
             return result or None
 
         except asyncio.TimeoutError:
+            try:
+                process.kill()
+                await process.wait()
+            except Exception:
+                pass
             logger.warning(
                 "haiku_timeout", timeout=self.timeout,
             )

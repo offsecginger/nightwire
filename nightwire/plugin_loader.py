@@ -2,7 +2,8 @@
 
 Scans the plugins directory for ``plugin.py`` files, instantiates
 NightwirePlugin subclasses, and collects their commands, message
-matchers, and help sections. Manages start/stop lifecycle hooks.
+matchers, help sections, and agent specifications. Manages
+start/stop lifecycle hooks and generates agent catalog prompts.
 
 Key classes:
     PluginLoader: Discovers, loads, validates, and manages plugins.
@@ -10,14 +11,16 @@ Key classes:
 
 import importlib
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List
+from typing import Awaitable, Callable, Dict, List, Optional
 
 import structlog
 
 from .plugin_base import (
+    AgentSpec,
     CommandHandler,
     HelpSection,
     MessageMatcher,
@@ -74,6 +77,7 @@ class PluginLoader:
         self._commands: Dict[str, CommandHandler] = {}
         self._matchers: List[MessageMatcher] = []
         self._help: List[HelpSection] = []
+        self._agents: Dict[str, AgentSpec] = {}
 
     def discover_and_load(self) -> None:
         """Scan plugins_dir for plugin.py files and load them.
@@ -130,6 +134,7 @@ class PluginLoader:
             plugins_loaded=len(self.plugins),
             commands=len(self._commands),
             matchers=len(self._matchers),
+            agents=len(self._agents),
         )
 
     def _load_plugin(self, plugin_name: str, plugin_file: Path) -> None:
@@ -203,11 +208,30 @@ class PluginLoader:
         # Collect help
         self._help.extend(plugin.help_sections())
 
+        # Collect agents (M11)
+        for agent_name, spec in plugin.agents().items():
+            if not re.match(r'^[a-z][a-z0-9-]*$', agent_name):
+                logger.warning(
+                    "plugin_invalid_agent_name",
+                    agent=agent_name,
+                    plugin=plugin_name,
+                )
+                continue
+            if agent_name in self._agents:
+                logger.warning(
+                    "plugin_agent_conflict",
+                    agent=agent_name,
+                    plugin=plugin_name,
+                )
+                continue
+            self._agents[agent_name] = spec
+
         logger.info(
             "plugin_loaded",
             plugin=plugin_name,
             version=plugin.version,
             commands=list(plugin.commands().keys()),
+            agents=list(plugin.agents().keys()),
         )
 
     async def start_all(self) -> None:
@@ -243,6 +267,49 @@ class PluginLoader:
     def get_sorted_matchers(self) -> List[MessageMatcher]:
         """Return all matchers sorted by priority (lower first)."""
         return sorted(self._matchers, key=lambda m: m.priority)
+
+    def get_all_agents(self) -> Dict[str, AgentSpec]:
+        """Return merged agent dict from all plugins."""
+        return dict(self._agents)
+
+    def get_agent_catalog_prompt(self) -> str:
+        """Generate a prompt section describing all registered agents.
+
+        Returns an empty string when no agents are registered (zero
+        token cost). When agents exist, returns a markdown section
+        listing each agent's name and description.
+        """
+        if not self._agents:
+            return ""
+        lines = [
+            "## Available Plugin Agents",
+            "The following agents are provided by plugins and may be"
+            " available during task execution:",
+        ]
+        for name, spec in self._agents.items():
+            lines.append(f"- **{name}**: {spec.description}")
+        lines.append(
+            "\nNote: Agent dispatch is controlled by the system."
+            " Mention an agent by name if you believe it would be"
+            " useful for the current task."
+        )
+        return "\n".join(lines)
+
+    def get_agent_definitions_json(self) -> "Optional[str]":
+        """Convert registered agents to ``--agents`` JSON format.
+
+        Returns None when no agents are registered. When agents exist,
+        returns a JSON string suitable for the CLI ``--agents`` flag.
+        """
+        if not self._agents:
+            return None
+        definitions = {}
+        for name, spec in self._agents.items():
+            agent_def: dict = {"description": spec.description}
+            if spec.prompt:
+                agent_def["prompt"] = spec.prompt
+            definitions[name] = agent_def
+        return json.dumps(definitions)
 
     def get_all_help(self) -> List[HelpSection]:
         """Return merged help sections from all plugins."""

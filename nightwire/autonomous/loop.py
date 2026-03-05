@@ -83,6 +83,8 @@ class AutonomousLoop:
         poll_interval: int = 30,
         max_parallel: int = 3,
         usage_recorder: Optional[Callable[..., Awaitable[None]]] = None,
+        debounce_seconds: float = 2.0,
+        get_agent_definitions: Callable[[], Optional[str]] = lambda: None,
     ):
         """Initialize the autonomous loop.
 
@@ -96,6 +98,10 @@ class AutonomousLoop:
             usage_recorder: Async callback to record usage data.
                 Signature: (phone_number, project_name, source,
                 usage_data) -> None.
+            debounce_seconds: Window for batching status notifications
+                per recipient. Critical notifications bypass debounce.
+            get_agent_definitions: Callback returning agent definitions
+                JSON for ``--agents`` CLI flag. None when no agents.
         """
         self.db = db
         self.executor = executor
@@ -103,6 +109,12 @@ class AutonomousLoop:
         self.poll_interval = poll_interval
         self.max_parallel = max_parallel
         self._usage_recorder = usage_recorder
+        self._debounce_seconds = debounce_seconds
+        self._get_agent_definitions = get_agent_definitions
+
+        # Notification debounce buffers (M10)
+        self._notification_buffer: dict[str, list[str]] = {}
+        self._notification_timers: dict[str, asyncio.Task] = {}
 
         self._running = False
         self._paused = False
@@ -232,6 +244,9 @@ class AutonomousLoop:
     async def stop(self) -> None:
         """Stop the autonomous loop and cancel all workers."""
         self._running = False
+
+        # Flush any pending debounced notifications before shutdown
+        await self._flush_all_notifications()
 
         # Cancel all active workers
         for task_id, worker in list(self._active_workers.items()):
@@ -612,7 +627,7 @@ class AutonomousLoop:
                 task.id, TaskStatus.QUEUED,
                 error_message=f"Deferred: {status.reason}",
             )
-            await self._notify(
+            await self._notify_debounced(
                 task.phone_number,
                 f"Task deferred (resources): {task.title}\n{status.reason}",
             )
@@ -688,8 +703,8 @@ class AutonomousLoop:
                     f" [parallel: {len(self._active_task_ids)} workers]"
                 )
 
-            # Notify user with context
-            await self._notify(
+            # Notify user with context (debounced — status update)
+            await self._notify_debounced(
                 task.phone_number,
                 f"Starting task{prd_title}: {task.title}"
                 f"{story_progress}{parallel_info}",
@@ -697,13 +712,15 @@ class AutonomousLoop:
 
             # Create a progress callback for this task
             async def task_progress(msg: str):
-                await self._notify(
+                await self._notify_debounced(
                     task.phone_number, f"  [{task.id}] {msg}",
                 )
 
             # Execute the task
+            agent_defs = self._get_agent_definitions()
             result = await self.executor.execute(
                 task, progress_callback=task_progress,
+                agent_definitions=agent_defs,
             )
 
             # Record accumulated usage from task execution
@@ -774,6 +791,17 @@ class AutonomousLoop:
                 task.phone_number,
                 f"Task FAILED: {task.title}\nCheck logs for details.",
             )
+        except asyncio.CancelledError:
+            logger.info("task_cancelled", task_id=task.id)
+            # Only update DB if not already handled (e.g. by _check_stuck_tasks
+            # which sets QUEUED/FAILED before the CancelledError propagates)
+            current = await self.db.get_task(task.id)
+            if current and current.status == TaskStatus.IN_PROGRESS:
+                await self.db.update_task_status(
+                    task.id, TaskStatus.CANCELLED,
+                    error_message="Worker cancelled",
+                )
+            raise
         finally:
             if self._current_task_id == task.id:
                 self._current_task_id = None
@@ -861,7 +889,7 @@ class AutonomousLoop:
                 error_message=result.error_message,
             )
 
-            await self._notify(
+            await self._notify_debounced(
                 task.phone_number,
                 f"Task failed, retrying"
                 f" ({task.retry_count + 1}/{task.max_retries}): "
@@ -941,8 +969,12 @@ class AutonomousLoop:
                     consecutive_failures=cb.consecutive_failures,
                     threshold=threshold,
                 )
-                # Notify admin (first allowed number)
-                asyncio.ensure_future(self._notify_circuit_breaker_trip(cb))
+                # Notify admin (first allowed number, best-effort)
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._notify_circuit_breaker_trip(cb))
+                except RuntimeError:
+                    pass  # No running event loop (e.g. sync test context)
 
     async def _notify_circuit_breaker_trip(
         self, cb: CircuitBreakerState,
@@ -1031,7 +1063,7 @@ class AutonomousLoop:
                         f" >{timeout_minutes}min)"
                     ),
                 )
-                await self._notify(
+                await self._notify_debounced(
                     task.phone_number,
                     f"Stuck task re-queued: {info.task_title}",
                 )
@@ -1214,7 +1246,7 @@ class AutonomousLoop:
                             title=task.title,
                             started_at=str(task.started_at),
                         )
-                        await self._notify(
+                        await self._notify_debounced(
                             task.phone_number,
                             f"Recovered stale task (re-queued):"
                             f" {task.title}",
@@ -1249,8 +1281,82 @@ class AutonomousLoop:
             )
             return 0
 
+    async def _notify_debounced(
+        self, phone_number: str, message: str,
+    ) -> None:
+        """Buffer a status notification for batched delivery.
+
+        Non-critical notifications (task started, progress, deferred,
+        stale re-queued) are buffered per recipient and flushed after
+        ``_debounce_seconds`` of inactivity. This prevents flooding
+        the user with rapid-fire status updates during parallel execution.
+
+        Args:
+            phone_number: Recipient phone number.
+            message: Notification text to buffer.
+        """
+        if phone_number not in self._notification_buffer:
+            self._notification_buffer[phone_number] = []
+        self._notification_buffer[phone_number].append(message)
+
+        # Cancel existing timer for this recipient (reset window)
+        existing = self._notification_timers.get(phone_number)
+        if existing and not existing.done():
+            existing.cancel()
+
+        self._notification_timers[phone_number] = asyncio.create_task(
+            self._delayed_flush(phone_number),
+        )
+
+    async def _delayed_flush(self, phone_number: str) -> None:
+        """Wait for debounce window then flush buffered notifications.
+
+        Args:
+            phone_number: Recipient whose buffer to flush.
+        """
+        try:
+            await asyncio.sleep(self._debounce_seconds)
+            await self._flush_notifications(phone_number)
+        except asyncio.CancelledError:
+            pass
+
+    async def _flush_notifications(self, phone_number: str) -> None:
+        """Send all buffered notifications for a recipient as one message.
+
+        Joins buffered messages with a separator and sends as a single
+        combined notification. Clears the buffer after sending.
+
+        Args:
+            phone_number: Recipient whose buffer to flush.
+        """
+        messages = self._notification_buffer.pop(phone_number, [])
+        self._notification_timers.pop(phone_number, None)
+        if messages:
+            combined = "\n---\n".join(messages)
+            await self._notify(phone_number, combined)
+
+    async def _flush_all_notifications(self) -> None:
+        """Flush all pending notification buffers immediately.
+
+        Called during stop() to ensure no notifications are lost.
+        """
+        # Cancel all pending timers
+        for timer in self._notification_timers.values():
+            if not timer.done():
+                timer.cancel()
+
+        # Flush all buffers
+        for phone_number in list(self._notification_buffer.keys()):
+            await self._flush_notifications(phone_number)
+        self._notification_timers.clear()
+
     async def _notify(self, phone_number: str, message: str) -> None:
-        """Send a notification to the user."""
+        """Send a notification to the user immediately.
+
+        Used for critical notifications (task completed/failed, story/PRD
+        completion, circuit breaker trips). Status updates should use
+        ``_notify_debounced`` instead.
+        """
         if self.progress_callback:
             try:
                 await self.progress_callback(phone_number, message)

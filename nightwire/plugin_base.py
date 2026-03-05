@@ -11,6 +11,7 @@ Key classes:
     MessageMatcher: Priority-ordered message interceptor registered
         by plugins for non-command message handling.
     HelpSection: Structured help text contributed by a plugin.
+    AgentSpec: Declarative specification for a plugin-registered agent.
 
 Type aliases:
     CommandHandler: ``async (sender, args) -> str``.
@@ -53,6 +54,33 @@ class HelpSection:
     """
     title: str
     commands: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class AgentSpec:
+    """Declarative specification for a plugin-registered agent.
+
+    Describes an agent capability for CLI-native dispatch via
+    ``--agents <json>``. The catalog of registered agents is
+    injected into Claude prompts, and agent definitions are passed
+    to the CLI for native dispatch within Claude sessions.
+
+    Agent names use hyphens only (no underscores) to align with
+    CLI agent naming conventions (e.g., ``.claude/agents/`` filenames).
+    This distinguishes agent names from command names, which allow
+    underscores.
+
+    Attributes:
+        name: Unique agent name (lowercase, alphanumeric + hyphens,
+            e.g. ``"code-reviewer"``). Validated on registration.
+        description: One-line description for catalog and CLI.
+        prompt: System instructions for the agent when invoked.
+            Passed as the agent's prompt in ``--agents`` JSON.
+            Empty string means no custom prompt (description only).
+    """
+    name: str
+    description: str
+    prompt: str = ""
 
 
 class PluginContext:
@@ -124,6 +152,15 @@ class NightwirePlugin:
         """Return {command_name: async_handler} to register as /commands.
 
         Handler signature: async (sender: str, args: str) -> str
+        """
+        return {}
+
+    def agents(self) -> Dict[str, "AgentSpec"]:
+        """Return {agent_name: AgentSpec} for plugin-registered agents.
+
+        Registered agents are described in Claude's prompt context
+        and passed to the CLI via ``--agents <json>`` for native
+        dispatch within Claude sessions.
         """
         return {}
 
