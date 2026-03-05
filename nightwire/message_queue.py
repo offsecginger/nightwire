@@ -184,8 +184,8 @@ class MessageQueue:
                     logger.debug(
                         "typing_indicator_failed", status=resp.status
                     )
-        except Exception:
-            pass  # Best-effort, never block
+        except Exception as e:
+            logger.debug("typing_indicator_error", error=str(e))
 
     async def close(self) -> None:
         """Drain queues and shut down consumers gracefully."""

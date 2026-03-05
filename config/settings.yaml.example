@@ -13,7 +13,7 @@ signal_api_url: "http://127.0.0.1:8080"
 
 # Claude CLI settings
 claude_timeout: 600           # Max seconds per Claude invocation
-claude_max_turns: 15          # Max conversation turns per invocation
+claude_max_turns: 30          # Max conversation turns per invocation
 # claude_path: "/usr/local/bin/claude"  # Override Claude CLI path
 
 # Memory System
@@ -48,6 +48,8 @@ autonomous:
 #   failure_window_seconds: 300      # Window for counting consecutive failures
 
 # Optional: nightwire AI assistant (any OpenAI-compatible provider)
+# API keys go in config/.env (not here) for security.
+# Set OPENAI_API_KEY or GROK_API_KEY in config/.env
 nightwire_assistant:
   enabled: false
   # Built-in providers: "openai", "grok" (auto-detected from API keys if omitted)
@@ -95,6 +97,16 @@ nightwire_assistant:
 #   enabled: false
 #   check_interval: 21600      # Seconds between checks (default: 6 hours)
 #   branch: "main"             # Git branch to track
+
+# Logging
+# Override log level: NIGHTWIRE_LOG_LEVEL env var or --debug CLI flag
+# logging:
+#   level: INFO              # Global log level (DEBUG, INFO, WARNING, ERROR)
+#   max_file_size_mb: 10     # Per-subsystem log file rotation size
+#   backup_count: 5          # Rotated log file retention count
+#   subsystem_levels:        # Per-subsystem overrides
+#     autonomous: DEBUG
+#     claude: DEBUG
 
 # Docker Sandbox (optional, default off)
 # Runs Claude task execution inside a Docker container for isolation

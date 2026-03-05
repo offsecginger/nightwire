@@ -16,16 +16,24 @@ logger = structlog.get_logger("nightwire.autonomous")
 class AutonomousCommands:
     """Handlers for autonomous-related slash commands."""
 
-    def __init__(self, manager: AutonomousManager, get_current_project: callable):
+    def __init__(
+        self,
+        manager: AutonomousManager,
+        get_current_project: callable,
+        is_prd_creating: callable = lambda phone: False,
+    ):
         """
         Initialize command handlers.
 
         Args:
             manager: AutonomousManager instance
             get_current_project: Callable(phone_number) -> (project_name, project_path)
+            is_prd_creating: Callable(phone_number) -> bool, checks if a PRD is
+                currently being generated for this sender.
         """
         self.manager = manager
         self.get_current_project = get_current_project
+        self.is_prd_creating = is_prd_creating
 
     # ========== /prd Command ==========
 
@@ -464,6 +472,11 @@ Example:
         )
 
         if not tasks:
+            if self.is_prd_creating(phone):
+                return (
+                    "No tasks found. A PRD is currently being generated "
+                    "— tasks will appear once it completes."
+                )
             return "No tasks found."
 
         # Group by status

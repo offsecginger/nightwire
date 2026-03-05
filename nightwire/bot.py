@@ -259,12 +259,24 @@ class SignalBot:
             debounce_seconds=self.config.signal_notification_debounce_seconds,
             get_agent_definitions=self.plugin_loader.get_agent_definitions_json,
         )
+        def _is_prd_creating(phone: str) -> bool:
+            """Check if a PRD creation task is active for this sender."""
+            for (sender, _proj), state in self.task_manager._sender_tasks.items():
+                if sender == phone and state.get("description", "").startswith(
+                    "Creating PRD:"
+                ):
+                    task = state.get("task")
+                    if task and not task.done():
+                        return True
+            return False
+
         self.autonomous_commands = AutonomousCommands(
             manager=self.autonomous_manager,
             get_current_project=lambda phone: (
                 self.project_manager.get_current_project(phone),
                 self.project_manager.get_current_path(phone),
             ),
+            is_prd_creating=_is_prd_creating,
         )
 
         # Start plugins
@@ -511,11 +523,14 @@ class SignalBot:
                 break
             # Try to split at paragraph boundary
             split_at = remaining.rfind("\n\n", 0, max_len)
-            if split_at < max_len // 2:
+            if split_at == -1 or split_at < max_len // 4:
                 # Try single newline
                 split_at = remaining.rfind("\n", 0, max_len)
-            if split_at < max_len // 2:
-                # Hard split at max_len
+            if split_at == -1 or split_at < max_len // 4:
+                # Try word boundary
+                split_at = remaining.rfind(" ", 0, max_len)
+            if split_at == -1 or split_at < max_len // 4:
+                # Hard split at max_len (last resort)
                 split_at = max_len
             parts.append(remaining[:split_at])
             remaining = remaining[split_at:].lstrip("\n")

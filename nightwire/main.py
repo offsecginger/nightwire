@@ -11,7 +11,9 @@ Key functions:
     run: Synchronous wrapper that calls asyncio.run(main()).
 """
 
+import argparse
 import asyncio
+import os
 import signal
 import sys
 
@@ -20,8 +22,23 @@ import structlog
 from .logging_config import setup_logging
 
 
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description="Nightwire — AI dev assistant via Signal")
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Enable DEBUG log level (overrides config)",
+    )
+    return parser.parse_args()
+
+
 async def main():
     """Main async entry point."""
+    args = parse_args()
+
+    if args.debug:
+        os.environ["NIGHTWIRE_LOG_LEVEL"] = "DEBUG"
+
     # Phase 1: defaults, cache_logger_on_first_use=False
     setup_logging()
     logger = structlog.get_logger("nightwire")

@@ -22,6 +22,7 @@ ConsoleRenderer(colors=False) for files.
 
 import logging
 import logging.handlers
+import os
 import re
 import sys
 from pathlib import Path
@@ -129,6 +130,11 @@ def setup_logging(config=None) -> None:
         max_bytes = 10 * 1024 * 1024  # 10 MB
         backup_count = 5
         cache_loggers = False
+
+    # NIGHTWIRE_LOG_LEVEL env var overrides config (set by --debug flag)
+    env_level = os.environ.get("NIGHTWIRE_LOG_LEVEL", "").upper()
+    if env_level and hasattr(logging, env_level):
+        root_level_name = env_level
 
     root_level = getattr(logging, root_level_name, logging.INFO)
 

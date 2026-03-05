@@ -123,9 +123,9 @@ class CoreCommandHandler(BaseCommandHandler):
                 ["/complex Build user management API"],
             ),
             "cancel": HelpMetadata(
-                "Cancel the currently running background task",
-                "/cancel",
-                ["/cancel"],
+                "Cancel interactive task, autonomous task by ID, or all",
+                "/cancel [<task_id> | all]",
+                ["/cancel", "/cancel 5", "/cancel all"],
             ),
             "summary": HelpMetadata(
                 "Generate a project summary",
@@ -535,19 +535,41 @@ class CoreCommandHandler(BaseCommandHandler):
         return None
 
     async def handle_cancel(self, sender: str, args: str) -> str:
-        """Cancel the currently running background task for this sender.
+        """Cancel interactive tasks, autonomous tasks by ID, or all.
 
         Signal usage::
 
-            /cancel
+            /cancel                         — Cancel current interactive task
+            /cancel 5                       — Cancel autonomous task #5
+            /cancel all                     — Cancel interactive + pause autonomous loop
 
         Args:
             sender: Phone number or UUID of the message sender.
-            args: Unused.
+            args: Optional task ID or "all".
 
         Returns:
             Confirmation that the task was cancelled, or a message if no task is running.
         """
+        args = args.strip()
+
+        # /cancel <id> — cancel a specific autonomous task
+        if args.isdigit():
+            task_id = int(args)
+            stopped = await self.ctx.autonomous_manager.stop_worker(task_id)
+            if stopped:
+                return f"Autonomous task #{task_id} cancelled."
+            return f"Task #{task_id} not found or not running."
+
+        # /cancel all — cancel interactive + pause autonomous loop
+        if args.lower() == "all":
+            project_name = self.ctx.project_manager.get_current_project(sender)
+            interactive_result = await self.ctx.task_manager.cancel_current_task(
+                sender, project_name
+            )
+            await self.ctx.autonomous_manager.pause_loop()
+            return f"{interactive_result}\nAutonomous loop paused."
+
+        # /cancel (no args) — cancel current interactive task
         project_name = self.ctx.project_manager.get_current_project(sender)
         return await self.ctx.task_manager.cancel_current_task(sender, project_name)
 

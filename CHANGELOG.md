@@ -5,6 +5,23 @@ All notable changes to nightwire (formerly sidechannel) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] - 2026-03-05
+
+### Fixed — Production Deployment Issues
+
+- `bot.py`: Fixed `_split_message()` rfind bug — `rfind()` returning -1 was treated as a valid split position, causing messages to be cut off at the last character instead of falling through to the next boundary type. Added word-boundary fallback between newline and hard split.
+- `message_queue.py`: Added debug logging for typing indicator errors — previously `except Exception: pass` silently swallowed all failures, making typing indicator issues invisible in production logs.
+- `autonomous/commands.py`: `/tasks` now detects active PRD creation and shows "A PRD is currently being generated" instead of a bare "No tasks found" during the ~95s gap between `/complex` and task creation.
+- `commands/core.py`: Extended `/cancel` to support autonomous task IDs (`/cancel 5`) and `/cancel all` (cancels interactive task + pauses autonomous loop). Previously `/cancel` only cancelled interactive TaskManager tasks and ignored the `args` parameter entirely.
+- `config.py`: Increased `claude_max_turns` default from 15 to 30 — production logs showed Claude exhausting turns on planning before writing files (`files_changed=0` on all tasks, circuit breaker tripped after 3 consecutive failures).
+- `install.sh`: Changed systemd `StandardOutput=append:$LOGS_DIR/nightwire.log` to `StandardOutput=journal` — the RotatingFileHandler already writes clean plain-text to nightwire.log, so stdout redirect was causing duplicate lines with ANSI color codes.
+
+### Added
+
+- `main.py`: `--debug` CLI flag via argparse — sets `NIGHTWIRE_LOG_LEVEL=DEBUG` env var before logging initialization.
+- `logging_config.py`: `NIGHTWIRE_LOG_LEVEL` environment variable override — takes precedence over `logging.level` in settings.yaml. Enables debug logging without config file changes.
+- `settings.yaml.example`: Added logging configuration section with env var and CLI flag documentation. Added clarifying comment that API keys belong in `.env` not `settings.yaml`.
+
 ## [3.0.0] - 2026-03-05
 
 ### Fixed — Production Testing
