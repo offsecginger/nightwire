@@ -5,6 +5,31 @@ All notable changes to nightwire (formerly sidechannel) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.2] - 2026-03-06
+
+### Fixed — Production Deployment Issues (v3.0.1 Observations)
+
+- `autonomous/executor.py`: Fixed `_get_files_changed()` not detecting newly created (untracked) files — `git diff --name-only HEAD` only sees tracked file changes. Added `git ls-files --others --exclude-standard` for new files and `git diff --name-only --cached` for staged changes. This was the root cause of `files_changed=0` on all task executions.
+- `autonomous/executor.py`: Short-circuit tasks that produce zero file changes — immediately fail with clear error message instead of running expensive verification/auto-fix loops on empty workspaces.
+- `autonomous/verifier.py`: Added `invalidate_cache(task_id)` method and task-to-hash tracking — auto-fix loop now clears stale verification cache before re-verification, preventing infinite `verification_cache_hit passed=False` loops.
+- `commands/core.py`: `/cancel all` now cancels active autonomous workers in addition to pausing the loop — previously only paused dispatch (existing workers continued running indefinitely).
+- `autonomous/loop.py`: Added `cancel_all_workers()` method that cancels all active worker tasks and marks them CANCELLED in the database.
+- `install.sh`: Fixed port 9090 "Address already in use" error — set `allow_reuse_address = True` before bind (was setting `SO_REUSEADDR` after bind), added signal handler cleanup for SIGALRM/SIGTERM, and proper `server_close()` in finally block.
+- `bot.py`: Reduced message split limit from 5000 to 3000 characters — Signal clients may truncate at various thresholds below 5000.
+- `autonomous/commands.py`: Increased `/tasks` title display from 40 to 60 characters — task names were being cut off in Signal output.
+- `config.py`: Increased notification debounce default from 2.0s to 5.0s — reduces notification spam during parallel autonomous execution.
+
+### Added
+
+- `config.py`: `claude_max_turns_planning` and `claude_max_turns_execution` config properties — allows separate turn limits for planning phase (PRD creation, verification) vs execution phase (task implementation, auto-fix). Both default to `claude_max_turns` if not set separately.
+- `claude_runner.py`: `max_turns_override` parameter threaded through `run_claude()`, `_run_claude_inner()`, `_execute_once()`, `_execute_once_streaming()`, and `_build_command()` — enables per-invocation turn limit overrides.
+- `autonomous/manager.py`: `cancel_all_workers()` pass-through to loop.
+- `settings.yaml.example`: Documented `claude_max_turns_planning` and `claude_max_turns_execution` options.
+
+### Known Limitations
+
+- Signal "Note to Self" conversations do not display typing indicators — this is a Signal client limitation, not a Nightwire bug. Typing indicators work correctly in conversations with other users.
+
 ## [3.0.1] - 2026-03-05
 
 ### Fixed — Production Deployment Issues

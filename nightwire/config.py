@@ -179,6 +179,28 @@ class Config:
         return self.settings.get("claude_max_turns", 30)
 
     @property
+    def claude_max_turns_planning(self) -> int:
+        """Max turns for planning-phase invocations (PRD creation, verification).
+
+        Defaults to ``claude_max_turns`` if not set separately.
+        Configurable via ``claude_max_turns_planning`` in settings.yaml.
+        """
+        return self.settings.get(
+            "claude_max_turns_planning", self.claude_max_turns
+        )
+
+    @property
+    def claude_max_turns_execution(self) -> int:
+        """Max turns for execution-phase invocations (task implementation, auto-fix).
+
+        Defaults to ``claude_max_turns`` if not set separately.
+        Configurable via ``claude_max_turns_execution`` in settings.yaml.
+        """
+        return self.settings.get(
+            "claude_max_turns_execution", self.claude_max_turns
+        )
+
+    @property
     def claude_path(self) -> str:
         """Get absolute path to Claude CLI binary.
 
@@ -635,7 +657,7 @@ class Config:
 
     @property
     def signal_notification_debounce_seconds(self) -> float:
-        """Debounce interval for autonomous notifications. Default 2.0.
+        """Debounce interval for autonomous notifications. Default 5.0.
 
         Status notifications from the autonomous loop are buffered and
         combined into a single message after this many seconds of quiet.
@@ -644,7 +666,7 @@ class Config:
         settings.yaml.
         """
         return float(
-            self.settings.get("signal_notification_debounce_seconds", 2.0)
+            self.settings.get("signal_notification_debounce_seconds", 5.0)
         )
 
     @property

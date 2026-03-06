@@ -585,6 +585,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 response_model=PRDBreakdown,
                 timeout=self.config.claude_timeout,
                 project_path=project_path,
+                max_turns_override=self.config.claude_max_turns_planning,
             )
 
             # Record structured call usage
@@ -613,6 +614,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 fallback_prompt,
                 timeout=self.config.claude_timeout,
                 project_path=project_path,
+                max_turns_override=self.config.claude_max_turns_planning,
             )
             # Record fallback call usage
             await self._record_usage(

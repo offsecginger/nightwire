@@ -409,7 +409,9 @@ signal_api_url: "http://127.0.0.1:8080"
 
 # Claude CLI settings
 claude_timeout: 600         # Max seconds per Claude invocation (default: 1800)
-# claude_max_turns: 15        # Max conversation turns per invocation
+# claude_max_turns: 30        # Max conversation turns per invocation
+# claude_max_turns_planning: 30   # Override for planning (PRD, verification)
+# claude_max_turns_execution: 30  # Override for task implementation/auto-fix
 # claude_model: "claude-sonnet-4-5"    # Override model
 # claude_path: "/usr/local/bin/claude"  # Override Claude CLI path
 

@@ -411,6 +411,7 @@ class TaskExecutor:
                 progress_callback=progress_callback,
                 memory_context=None,  # Context already in prompt
                 agent_definitions=agent_definitions,
+                max_turns_override=self.config.claude_max_turns_execution,
             )
             # Capture usage immediately before any subsequent call overwrites
             if runner.last_usage:
@@ -430,6 +431,31 @@ class TaskExecutor:
             files_changed = await self._get_files_changed(project_path)
 
             await report_step(f"Implementation complete, files changed: {len(files_changed)}")
+
+            # Short-circuit: if Claude claims success but created/modified
+            # nothing, fail immediately — no point running expensive
+            # verification on an empty workspace
+            if not files_changed:
+                logger.warning(
+                    "no_files_changed",
+                    task_id=task.id,
+                    task_title=task.title,
+                    output_preview=output[:200],
+                )
+                return TaskExecutionResult(
+                    task_id=task.id,
+                    success=False,
+                    claude_output=output,
+                    error_message=(
+                        "Claude completed but created/modified no files."
+                        " The task may need clearer instructions or the"
+                        " project environment may be misconfigured."
+                    ),
+                    execution_time_seconds=(
+                        (datetime.now() - start_time).total_seconds()
+                    ),
+                    usage_data=usage_records or None,
+                )
 
             # Commit task changes to git (isolates from parallel workers)
             try:
@@ -647,6 +673,7 @@ class TaskExecutor:
                     timeout=min(self.config.claude_timeout, 600),
                     memory_context=None,
                     agent_definitions=agent_definitions,
+                    max_turns_override=self.config.claude_max_turns_execution,
                 )
                 # Capture usage before close()
                 if fix_runner.last_usage:
@@ -665,10 +692,11 @@ class TaskExecutor:
             current_output = fix_output
             current_files = await self._get_files_changed(project_path)
 
-            # Re-verify
+            # Re-verify (invalidate cache so we get a fresh result)
             await report_step("Re-verifying after fix...")
             try:
                 verifier = self._get_verifier()
+                verifier.invalidate_cache(task.id)
                 current_result = await verifier.verify(
                     task=task,
                     claude_output=fix_output,
@@ -865,16 +893,46 @@ class TaskExecutor:
     async def _get_files_changed(self, project_path: Path) -> List[str]:
         """Get files changed by the task using git (source of truth).
 
-        Checks uncommitted changes first, then falls back to the last
-        commit diff (task may already be committed at this point).
+        Checks uncommitted changes (tracked + untracked), then falls
+        back to the last commit diff (task may already be committed).
         """
         files = set()
         active_proc = None
         try:
             async with _get_git_lock(str(project_path)):
-                # Check uncommitted changes
+                # Check uncommitted changes to tracked files
                 proc = await asyncio.create_subprocess_exec(
                     "git", "diff", "--name-only", "HEAD",
+                    cwd=str(project_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                active_proc = proc
+                stdout, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=15
+                )
+                for line in stdout.decode().strip().splitlines():
+                    if line.strip():
+                        files.add(line.strip())
+
+                # Check for NEW untracked files (git diff misses these)
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "ls-files", "--others", "--exclude-standard",
+                    cwd=str(project_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                active_proc = proc
+                stdout, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=15
+                )
+                for line in stdout.decode().strip().splitlines():
+                    if line.strip():
+                        files.add(line.strip())
+
+                # Also check staged changes not yet committed
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "diff", "--name-only", "--cached",
                     cwd=str(project_path),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,

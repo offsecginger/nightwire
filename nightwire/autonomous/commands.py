@@ -492,7 +492,7 @@ Example:
             if status in by_status:
                 lines.append(f"\n{status.upper()}:")
                 for task in by_status[status][:10]:
-                    lines.append(f"  #{task.id} {task.title[:40]}")
+                    lines.append(f"  #{task.id} {task.title[:60]}")
                 if len(by_status[status]) > 10:
                     lines.append(f"  ... and {len(by_status[status]) - 10} more")
 

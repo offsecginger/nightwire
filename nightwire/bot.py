@@ -503,7 +503,7 @@ class SignalBot:
         logger.error("account_request_failed_all_attempts", attempts=max_attempts)
 
     @staticmethod
-    def _split_message(text: str, max_len: int = 5000) -> list:
+    def _split_message(text: str, max_len: int = 3000) -> list:
         """Split long messages at paragraph/line boundaries.
 
         Args:

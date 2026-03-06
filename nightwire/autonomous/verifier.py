@@ -58,6 +58,18 @@ class VerificationAgent:
         self.config = get_config()
         # Cache: maps diff hash -> {'result': VerificationResult, '_cached_at': float}
         self._cache: dict[int, dict] = {}
+        # Track task_id -> diff_hash for targeted invalidation
+        self._task_cache_keys: dict[int, int] = {}
+
+    def invalidate_cache(self, task_id: int) -> None:
+        """Clear cached verification result for a task.
+
+        Called after auto-fix attempts so re-verification runs fresh
+        instead of returning a stale cached failure.
+        """
+        diff_hash = self._task_cache_keys.pop(task_id, None)
+        if diff_hash is not None:
+            self._cache.pop(diff_hash, None)
 
     async def verify(
         self,
@@ -177,6 +189,7 @@ class VerificationAgent:
 
                 # Cache the result for this diff with TTL timestamp
                 self._cache[diff_hash] = {'result': result, '_cached_at': time.time()}
+                self._task_cache_keys[task.id] = diff_hash
 
                 # Bound cache size to prevent memory leaks
                 if len(self._cache) > 100:
@@ -238,6 +251,7 @@ class VerificationAgent:
                 prompt=prompt,
                 response_model=VerificationOutput,
                 timeout=timeout,
+                max_turns_override=self.config.claude_max_turns_planning,
             )
             if not success or not isinstance(result, VerificationOutput):
                 logger.info(
@@ -278,6 +292,7 @@ class VerificationAgent:
         try:
             success, output = await runner.run_claude(
                 prompt=prompt, timeout=timeout, memory_context=None,
+                max_turns_override=self.config.claude_max_turns_planning,
             )
             if not success:
                 if attempt < max_attempts:

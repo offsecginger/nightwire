@@ -311,6 +311,27 @@ class AutonomousLoop:
 
         return True
 
+    async def cancel_all_workers(self) -> int:
+        """Cancel all active autonomous workers.
+
+        Returns the number of workers cancelled.
+        """
+        cancelled = 0
+        for task_id, worker in list(self._active_workers.items()):
+            if not worker.done():
+                worker.cancel()
+                cancelled += 1
+                try:
+                    await self.db.update_task_status(
+                        task_id, TaskStatus.CANCELLED,
+                        error_message="Cancelled via /cancel all",
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    pass
+        if cancelled:
+            logger.info("all_workers_cancelled", count=cancelled)
+        return cancelled
+
     async def restart_task(self, task_id: int) -> Optional[str]:
         """Re-queue a failed or cancelled task for execution.
 

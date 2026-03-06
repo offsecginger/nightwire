@@ -241,8 +241,7 @@ except ImportError:
             [ -z "$server_ip" ] && server_ip="<your-server-ip>"
 
             python3 - "$uri" << 'PYEOF' &
-import http.server, socketserver, sys, io, signal as sig
-sig.alarm(120)
+import http.server, socketserver, sys, io, signal as sig, os
 uri = sys.argv[1]
 try:
     import qrcode
@@ -265,9 +264,19 @@ class H(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(uri.encode())
     def log_message(self, *a): pass
+socketserver.TCPServer.allow_reuse_address = True
 s = socketserver.TCPServer(('0.0.0.0', 9090), H)
-s.socket.setsockopt(1, 2, 1)
-s.handle_request()
+def _cleanup(signum, frame):
+    try: s.server_close()
+    except: pass
+    os._exit(0)
+sig.signal(sig.SIGALRM, _cleanup)
+sig.signal(sig.SIGTERM, _cleanup)
+sig.alarm(120)
+try:
+    s.handle_request()
+finally:
+    s.server_close()
 PYEOF
             QR_SERVER_PID=$!
             echo ""

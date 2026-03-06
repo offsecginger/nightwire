@@ -196,6 +196,7 @@ class ClaudeRunner:
         resume_session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_definitions: Optional[str] = None,
+        max_turns_override: Optional[int] = None,
     ) -> list:
         """Build the ``claude -p`` command with appropriate flags.
 
@@ -210,6 +211,9 @@ class ClaudeRunner:
             agent_definitions: Optional JSON string defining inline agents
                 via ``--agents``. Format: ``'{"name": {"description": "...",
                 "prompt": "..."}}'``.
+            max_turns_override: Override max turns for this invocation.
+                Used by autonomous system to set separate planning vs
+                execution limits. None uses the global config default.
 
         Returns:
             List of command-line arguments.
@@ -236,14 +240,18 @@ class ClaudeRunner:
             cmd.extend(["--json-schema", json_schema])
         if resume_session_id:
             cmd.extend(["--resume", resume_session_id])
-        raw_turns = self.config.settings.get("claude_max_turns")
-        if raw_turns is not None:
-            try:
-                max_turns = int(raw_turns)
-                if max_turns > 0:
-                    cmd.extend(["--max-turns", str(max_turns)])
-            except (ValueError, TypeError):
-                pass
+        # Max turns: explicit override > global config
+        if max_turns_override is not None and max_turns_override > 0:
+            cmd.extend(["--max-turns", str(max_turns_override)])
+        else:
+            raw_turns = self.config.settings.get("claude_max_turns")
+            if raw_turns is not None:
+                try:
+                    max_turns = int(raw_turns)
+                    if max_turns > 0:
+                        cmd.extend(["--max-turns", str(max_turns)])
+                except (ValueError, TypeError):
+                    pass
         budget = self.config.claude_max_budget_usd
         if budget is not None:
             cmd.extend(["--max-budget-usd", str(budget)])
@@ -386,6 +394,7 @@ class ClaudeRunner:
         resume_session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_definitions: Optional[str] = None,
+        max_turns_override: Optional[int] = None,
     ) -> Tuple[bool, str]:
         """Run Claude with the given prompt, retrying on transient errors.
 
@@ -407,6 +416,8 @@ class ClaudeRunner:
             agent_name: Optional agent name for ``--agent`` dispatch.
             agent_definitions: Optional JSON string for ``--agents``
                 inline agent definitions.
+            max_turns_override: Override max turns for this invocation.
+                None uses the global ``claude_max_turns`` config default.
 
         Returns:
             Tuple of (success: bool, output: str).
@@ -457,6 +468,7 @@ class ClaudeRunner:
                 resume_session_id=resume_session_id,
                 agent_name=agent_name,
                 agent_definitions=agent_definitions,
+                max_turns_override=max_turns_override,
             )
             # Extract session_id and usage before invocation cleanup
             success, output = result
@@ -486,6 +498,7 @@ class ClaudeRunner:
         resume_session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_definitions: Optional[str] = None,
+        max_turns_override: Optional[int] = None,
     ) -> Tuple[bool, str]:
         """Core retry loop, isolated with per-invocation state."""
         from .rate_limit_cooldown import get_cooldown_manager
@@ -530,6 +543,7 @@ class ClaudeRunner:
                         resume_session_id=resume_session_id,
                         agent_name=agent_name,
                         agent_definitions=agent_definitions,
+                        max_turns_override=max_turns_override,
                     )
                 )
             else:
@@ -543,6 +557,7 @@ class ClaudeRunner:
                         resume_session_id=resume_session_id,
                         agent_name=agent_name,
                         agent_definitions=agent_definitions,
+                        max_turns_override=max_turns_override,
                     )
                 )
 
@@ -602,6 +617,7 @@ class ClaudeRunner:
         resume_session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_definitions: Optional[str] = None,
+        max_turns_override: Optional[int] = None,
     ) -> Tuple[bool, str, Optional[ErrorCategory]]:
         """Execute a single CLI subprocess call (non-streaming).
 
@@ -613,6 +629,7 @@ class ClaudeRunner:
             effective_project: Working directory for the subprocess.
             json_schema: Optional JSON schema for structured output.
             resume_session_id: Optional session ID for ``--resume``.
+            max_turns_override: Override max turns for this invocation.
 
         Returns:
             Tuple of (success, output_or_error, error_category).
@@ -632,6 +649,7 @@ class ClaudeRunner:
             resume_session_id=resume_session_id,
             agent_name=agent_name,
             agent_definitions=agent_definitions,
+            max_turns_override=max_turns_override,
         )
 
         # Wrap in Docker sandbox if enabled
@@ -853,6 +871,7 @@ class ClaudeRunner:
         resume_session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         agent_definitions: Optional[str] = None,
+        max_turns_override: Optional[int] = None,
     ) -> Tuple[bool, str, Optional[ErrorCategory]]:
         """Execute CLI with streaming NDJSON output.
 
@@ -871,6 +890,7 @@ class ClaudeRunner:
             resume_session_id=resume_session_id,
             agent_name=agent_name,
             agent_definitions=agent_definitions,
+            max_turns_override=max_turns_override,
         )
 
         # Wrap in Docker sandbox if enabled
@@ -1128,6 +1148,7 @@ class ClaudeRunner:
         project_path: Optional[Path] = None,
         agent_name: Optional[str] = None,
         agent_definitions: Optional[str] = None,
+        max_turns_override: Optional[int] = None,
     ) -> Tuple[bool, Union[T, str]]:
         """Run Claude with structured JSON output via --json-schema.
 
@@ -1145,6 +1166,7 @@ class ClaudeRunner:
             agent_name: Optional agent name for ``--agent`` dispatch.
             agent_definitions: Optional JSON string for ``--agents``
                 inline agent definitions.
+            max_turns_override: Override max turns for this invocation.
 
         Returns:
             Tuple of (success: bool, result: T | str).
@@ -1195,6 +1217,7 @@ class ClaudeRunner:
                 effective_project=effective_project,
                 agent_name=agent_name,
                 agent_definitions=agent_definitions,
+                max_turns_override=max_turns_override,
             )
             # Propagate usage (even on failure)
             self._last_usage = inv_state._last_usage
@@ -1213,6 +1236,7 @@ class ClaudeRunner:
         effective_project: Path,
         agent_name: Optional[str] = None,
         agent_definitions: Optional[str] = None,
+        max_turns_override: Optional[int] = None,
     ) -> Tuple[bool, Union[T, str]]:
         """Core retry loop for run_claude_structured."""
         from .rate_limit_cooldown import get_cooldown_manager
@@ -1238,6 +1262,7 @@ class ClaudeRunner:
                     json_schema=json_schema,
                     agent_name=agent_name,
                     agent_definitions=agent_definitions,
+                    max_turns_override=max_turns_override,
                 )
             )
 

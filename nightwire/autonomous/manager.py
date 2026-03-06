@@ -113,6 +113,14 @@ class AutonomousManager:
         """Get current loop status."""
         return await self.loop.get_status()
 
+    async def cancel_all_workers(self) -> int:
+        """Cancel all active autonomous workers.
+
+        Returns:
+            Number of workers cancelled.
+        """
+        return await self.loop.cancel_all_workers()
+
     async def stop_worker(self, task_id: int) -> bool:
         """Cancel a specific active worker.
 

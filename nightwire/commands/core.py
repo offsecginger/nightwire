@@ -560,14 +560,19 @@ class CoreCommandHandler(BaseCommandHandler):
                 return f"Autonomous task #{task_id} cancelled."
             return f"Task #{task_id} not found or not running."
 
-        # /cancel all — cancel interactive + pause autonomous loop
+        # /cancel all — cancel interactive + cancel all workers + pause loop
         if args.lower() == "all":
             project_name = self.ctx.project_manager.get_current_project(sender)
             interactive_result = await self.ctx.task_manager.cancel_current_task(
                 sender, project_name
             )
+            workers_cancelled = await self.ctx.autonomous_manager.cancel_all_workers()
             await self.ctx.autonomous_manager.pause_loop()
-            return f"{interactive_result}\nAutonomous loop paused."
+            parts = [interactive_result]
+            if workers_cancelled:
+                parts.append(f"{workers_cancelled} autonomous worker(s) cancelled.")
+            parts.append("Autonomous loop paused. Use /autonomous resume to restart.")
+            return "\n".join(parts)
 
         # /cancel (no args) — cancel current interactive task
         project_name = self.ctx.project_manager.get_current_project(sender)
