@@ -803,7 +803,7 @@ if [ "$RESTART" = true ]; then
 fi
 
 # Banner
-VERSION="3.0.0"
+VERSION="3.0.2"
 echo -e "${CYAN}"
 cat << 'EOF'
        _       _     _            _
