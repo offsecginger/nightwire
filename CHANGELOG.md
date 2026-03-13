@@ -5,6 +5,23 @@ All notable changes to nightwire (formerly sidechannel) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.5] - 2026-03-13
+
+### Fixed — Production Deployment Issues (v3.0.4 Observations)
+
+- `claude_runner.py`: Fixed `ValueError: Separator is found, but chunk is longer than limit` during streaming — `asyncio.create_subprocess_exec()` default 64KB buffer was too small for large Claude CLI NDJSON events (tool results, diffs). Increased to 1MB (`limit=1_048_576`).
+- `claude_runner.py`: Fixed rate limit cooldown triggering too aggressively — `rate_limit_event` handler now uses graduated response: hard-limit statuses (`limited`, `exceeded`, `blocked`) activate immediate 60-minute cooldown; soft/unknown statuses route through `record_rate_limit_failure()` threshold (3 within 5 min). Previously any non-`allowed` status triggered immediate cooldown. All `rate_limit_event` details now logged for debugging.
+
+### Added
+
+- **PRD pathway unification**: `/prd ingest [file]` analyzes a project file (default: CLAUDE.md) and all referenced files, then creates a full PRD with stories and tasks via Claude — without auto-queuing. Users can then `/queue prd <id>` to start autonomous execution or `/do task <id>` to work tasks manually. Bridges the gap between `/do` manual workflows and `/complex` autonomous execution.
+- **Manual autonomous task execution**: `/do task <id>` executes a specific autonomous task manually via the normal `/do` runner. Includes status validation (PENDING/QUEUED/FAILED/BLOCKED only), dependency warnings, CAS-style claim to prevent race with autonomous loop, and automatic story/PRD completion cascade on success.
+- **Install script sudo pre-flight**: `ensure_sudo()` function validates sudo availability and pre-caches credentials before any privileged operations (Java install, curl install, Docker install, service management). Prevents unexpected password prompts mid-installation.
+- `autonomous/commands.py`: `/tasks purge` subcommand — cancels all PENDING/QUEUED/BLOCKED tasks in one command. Previously users had no way to clear queued tasks without restarting the service.
+- `autonomous/database.py`: `purge_non_terminal_tasks()` async method with thread-safe `_lock` — marks non-terminal tasks as CANCELLED with descriptive error message. Supports optional project filter.
+- `autonomous/manager.py`: `prepare_manual_task()` and `complete_manual_task()` methods with inline story/PRD completion cascade (zero new DB methods — reuses existing `get_story()`/`get_prd()`/`update_*_status()`).
+- `task_manager.py`: `auto_queue` parameter on `create_autonomous_prd()` and `manual_task_id` parameter on `start_background_task()` with completion callbacks at all 3 exit points.
+
 ## [3.0.4] - 2026-03-06
 
 ### Fixed — Production Deployment Issues (v3.0.3 Observations)

@@ -132,6 +132,22 @@ class AutonomousManager:
         """
         return await self.loop.stop_worker(task_id)
 
+    async def purge_non_terminal_tasks(
+        self, phone_number: str, project_name: Optional[str] = None
+    ) -> int:
+        """Mark all PENDING/QUEUED/BLOCKED tasks as CANCELLED.
+
+        Args:
+            phone_number: Owner's phone number or UUID.
+            project_name: Optional project filter.
+
+        Returns:
+            Number of tasks purged.
+        """
+        return await self.db.purge_non_terminal_tasks(
+            phone_number, project_name
+        )
+
     async def restart_task(self, task_id: int) -> Optional[str]:
         """Re-queue a failed/cancelled/blocked task.
 
@@ -142,6 +158,137 @@ class AutonomousManager:
             None on success, or an error message string.
         """
         return await self.loop.restart_task(task_id)
+
+    async def prepare_manual_task(self, task_id: int) -> tuple:
+        """Prepare an autonomous task for manual /do execution.
+
+        Validates status, marks IN_PROGRESS, checks dependencies,
+        and returns task context for prompt building.
+
+        Args:
+            task_id: Database ID of the task to execute.
+
+        Returns:
+            Tuple of (error_message, context_dict). error_message
+            is None on success.
+        """
+        task = await self.db.get_task(task_id)
+        if not task:
+            return f"Task #{task_id} not found.", None
+
+        executable = {
+            TaskStatus.PENDING, TaskStatus.QUEUED,
+            TaskStatus.FAILED, TaskStatus.BLOCKED,
+        }
+        if task.status not in executable:
+            return (
+                f"Task #{task_id} is {task.status.value}"
+                " — cannot execute manually."
+            ), None
+
+        # Claim task (status guard — prevents race with loop)
+        await self.db.update_task_status(
+            task_id, TaskStatus.IN_PROGRESS,
+        )
+
+        # Check dependencies (warn but don't block)
+        warnings = []
+        if task.depends_on:
+            for dep_id in task.depends_on:
+                dep = await self.db.get_task(dep_id)
+                if dep and dep.status != TaskStatus.COMPLETED:
+                    warnings.append(
+                        f"Dep #{dep_id} ({dep.title[:40]})"
+                        f" is {dep.status.value}"
+                    )
+
+        # Build context
+        story = await self.db.get_story(task.story_id)
+        prd = None
+        if story:
+            prd = await self.db.get_prd(story.prd_id)
+
+        context = {
+            "task_id": task_id,
+            "title": task.title,
+            "description": task.description,
+            "story_title": story.title if story else "",
+            "prd_title": prd.title if prd else "",
+            "project_name": task.project_name,
+            "warnings": warnings,
+        }
+        return None, context
+
+    async def complete_manual_task(
+        self, task_id: int, success: bool,
+        output: str = "", error: str = "",
+    ) -> str:
+        """Mark a manually-executed task complete and cascade.
+
+        Updates task status, then checks story and PRD completion
+        using existing DB queries (no new DB methods).
+
+        Args:
+            task_id: Database ID of the task.
+            success: Whether execution succeeded.
+            output: Claude output on success.
+            error: Error message on failure.
+
+        Returns:
+            Summary string describing the outcome.
+        """
+        from datetime import datetime
+
+        task = await self.db.get_task(task_id)
+        if not task:
+            return f"Task #{task_id} not found."
+
+        if success:
+            await self.db.update_task_status(
+                task_id, TaskStatus.COMPLETED,
+                completed_at=datetime.now(),
+                claude_output=output[:5000] if output else None,
+            )
+            summary = f"Task #{task_id} completed."
+        else:
+            await self.db.update_task_status(
+                task_id, TaskStatus.FAILED,
+                error_message=error or "Manual execution failed",
+            )
+            summary = f"Task #{task_id} failed: {error[:200]}"
+
+        # Cascade: check story completion
+        story = await self.db.get_story(task.story_id)
+        if story and story.total_tasks > 0:
+            terminal = story.completed_tasks + story.failed_tasks
+            if terminal == story.total_tasks:
+                new_status = (
+                    StoryStatus.COMPLETED
+                    if story.failed_tasks == 0
+                    else StoryStatus.FAILED
+                )
+                await self.db.update_story_status(
+                    task.story_id, new_status,
+                )
+                summary += (
+                    f"\nStory '{story.title}'"
+                    f" {new_status.value}."
+                )
+                # Cascade: check PRD completion
+                prd = await self.db.get_prd(story.prd_id)
+                if prd and prd.total_stories > 0:
+                    finished = (
+                        prd.completed_stories + prd.failed_stories
+                    )
+                    if finished == prd.total_stories:
+                        await self.db.update_prd_status(
+                            story.prd_id, PRDStatus.COMPLETED,
+                        )
+                        summary += (
+                            f"\nPRD '{prd.title}' completed."
+                        )
+
+        return summary
 
     # ========== PRD Management ==========
 

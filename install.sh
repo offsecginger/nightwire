@@ -22,6 +22,27 @@ sed_inplace() {
     fi
 }
 
+# Ensure sudo is available and pre-cache credentials.
+# Call before any section that needs elevated privileges.
+# On macOS (brew), sudo is usually not needed for package installs.
+ensure_sudo() {
+    if [ "$(id -u)" -eq 0 ]; then
+        return 0  # Already root
+    fi
+    if [ "$(uname)" = "Darwin" ]; then
+        return 0  # macOS uses brew (no sudo needed for packages)
+    fi
+    if ! command -v sudo &> /dev/null; then
+        echo -e "  ${RED}Error: sudo is required but not installed.${NC}"
+        echo -e "  ${YELLOW}Install sudo or run as root.${NC}"
+        return 1
+    fi
+    if ! sudo -n true 2>/dev/null; then
+        echo -e "  ${YELLOW}Some operations require elevated privileges.${NC}"
+        sudo -v || { echo -e "  ${RED}Error: sudo authentication failed.${NC}"; return 1; }
+    fi
+}
+
 # Wait for Signal bridge QR code endpoint to be ready.
 # signal-cli inside the container needs time to fully initialize —
 # /v1/about returns OK first, but qrcodelink may not work yet.
@@ -110,6 +131,7 @@ prepare_link_tool() {
     fi
 
     if [ -z "$JAVA_CMD" ]; then
+        ensure_sudo || { echo -e "  ${RED}Cannot install Java without sudo.${NC}"; return 1; }
         echo -ne "  Installing Java 21 runtime..."
         if command -v apt-get &>/dev/null; then
             sudo apt-get install -y -qq openjdk-21-jre-headless > /dev/null 2>&1
@@ -488,6 +510,7 @@ if [ "$UNINSTALL" = true ]; then
             read -p "  Remove it? (requires sudo) [y/N] " -n 1 -r
             echo ""
             if [[ $REPLY =~ ^[Yy]$ ]]; then
+                ensure_sudo || { echo -e "  ${RED}Cannot remove service without sudo.${NC}"; }
                 sudo systemctl stop "$SYS_SERVICE_NAME" 2>/dev/null || true
                 sudo systemctl disable "$SYS_SERVICE_NAME" 2>/dev/null || true
                 sudo rm -f "$SYS_SERVICE"
@@ -803,7 +826,7 @@ if [ "$RESTART" = true ]; then
 fi
 
 # Banner
-VERSION="3.0.4"
+VERSION="3.0.5"
 echo -e "${CYAN}"
 cat << 'EOF'
        _       _     _            _
@@ -862,6 +885,7 @@ fi
 # curl (needed for Signal pairing verification)
 if ! command -v curl &> /dev/null; then
     echo -e "  ${YELLOW}!${NC} curl not found — installing..."
+    ensure_sudo || echo -e "  ${YELLOW}!${NC} Cannot install curl without sudo"
     if command -v apt-get &> /dev/null; then
         sudo apt-get install -y -qq curl > /dev/null 2>&1
     elif command -v dnf &> /dev/null; then
@@ -942,6 +966,7 @@ else
         read -p "    Install Docker now? [Y/n] " -n 1 -r
         echo ""
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            ensure_sudo || { echo -e "  ${RED}Cannot install Docker without sudo.${NC}"; exit 1; }
             echo -e "  ${CYAN}Installing Docker...${NC}"
             sudo apt-get update -qq && sudo apt-get install -y -qq docker.io > /dev/null
             sudo usermod -aG docker "$USER" 2>/dev/null || true
@@ -960,6 +985,7 @@ else
         read -p "    Install Docker now? [Y/n] " -n 1 -r
         echo ""
         if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            ensure_sudo || { echo -e "  ${RED}Cannot install Docker without sudo.${NC}"; exit 1; }
             echo -e "  ${CYAN}Installing Docker...${NC}"
             sudo dnf install -y -q docker > /dev/null
             sudo usermod -aG docker "$USER" 2>/dev/null || true

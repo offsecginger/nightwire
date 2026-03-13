@@ -903,6 +903,7 @@ class ClaudeRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                limit=1_048_576,  # 1MB — default 64KB too small for large NDJSON events
             )
             inv_state.process = process
 
@@ -989,14 +990,26 @@ class ClaudeRunner:
                             "rate_limit_info", {}
                         )
                         status = info.get("status", "")
-                        if status not in (
+                        logger.info(
+                            "rate_limit_event_received",
+                            status=status,
+                            message=info.get("message", ""),
+                        )
+                        if status in (
+                            "limited", "exceeded", "blocked",
+                        ):
+                            from .rate_limit_cooldown import (
+                                get_cooldown_manager,
+                            )
+                            get_cooldown_manager().activate()
+                        elif status not in (
                             "allowed",
                             "allowed_warning",
                         ):
                             from .rate_limit_cooldown import (
                                 get_cooldown_manager,
                             )
-                            get_cooldown_manager().activate()
+                            get_cooldown_manager().record_rate_limit_failure()
 
                     elif etype == "result":
                         final_response = event

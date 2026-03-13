@@ -1088,6 +1088,49 @@ class AutonomousDatabase:
             )
             self._conn.commit()
 
+    async def purge_non_terminal_tasks(
+        self, phone_number: str, project_name: Optional[str] = None
+    ) -> int:
+        """Mark all PENDING/QUEUED/BLOCKED tasks as CANCELLED.
+
+        Args:
+            phone_number: Owner's phone number or UUID.
+            project_name: Optional project filter.
+
+        Returns:
+            Number of tasks purged.
+        """
+        return await asyncio.to_thread(
+            self._purge_non_terminal_tasks_sync,
+            phone_number,
+            project_name,
+        )
+
+    def _purge_non_terminal_tasks_sync(
+        self, phone_number: str, project_name: Optional[str] = None
+    ) -> int:
+        with self._lock:
+            cursor = self._conn.cursor()
+            sql = """
+                UPDATE tasks SET status = ?, error_message = ?
+                WHERE phone_number = ?
+                AND status IN (?, ?, ?)
+            """
+            params: list = [
+                TaskStatus.CANCELLED.value,
+                "Purged via /tasks purge",
+                phone_number,
+                TaskStatus.PENDING.value,
+                TaskStatus.QUEUED.value,
+                TaskStatus.BLOCKED.value,
+            ]
+            if project_name:
+                sql += " AND project_name = ?"
+                params.append(project_name)
+            cursor.execute(sql, params)
+            self._conn.commit()
+            return cursor.rowcount
+
     async def queue_tasks_for_story(self, story_id: int) -> int:
         """Queue all pending tasks for a story.
 

@@ -12,6 +12,7 @@ from typing import List, Optional
 
 import structlog
 
+from ..autonomous.models import TaskStatus
 from .base import BaseCommandHandler, HelpMetadata
 
 logger = structlog.get_logger("nightwire.bot")
@@ -113,9 +114,9 @@ class CoreCommandHandler(BaseCommandHandler):
                 ["/ask How does auth work?"],
             ),
             "do": HelpMetadata(
-                "Execute a coding task with Claude",
-                "/do <task>",
-                ["/do Add input validation to login"],
+                "Execute a coding task or autonomous task manually",
+                "/do <task> | /do task <id>",
+                ["/do Add input validation to login", "/do task 5"],
             ),
             "complex": HelpMetadata(
                 "Break a large task into PRD with autonomous tasks",
@@ -457,7 +458,7 @@ class CoreCommandHandler(BaseCommandHandler):
         self, sender: str, args: str,
         image_paths: Optional[List[Path]] = None,
     ) -> Optional[str]:
-        """Execute a coding task with Claude on the current project.
+        """Execute a coding task or autonomous task manually.
 
         Runs in the background with streaming output. The default handler
         when a message is sent without a command prefix.
@@ -466,10 +467,11 @@ class CoreCommandHandler(BaseCommandHandler):
 
             /do Add input validation to the login form
             /do Fix the failing test in test_auth.py
+            /do task 5                              — Execute autonomous task #5
 
         Args:
             sender: Phone number or UUID of the message sender.
-            args: Task description for Claude to execute.
+            args: Task description or ``task <id>`` for manual autonomous.
             image_paths: Optional list of saved image file paths from
                 Signal attachments.
 
@@ -480,6 +482,16 @@ class CoreCommandHandler(BaseCommandHandler):
             return "Usage: /do <task to perform>"
         if self.ctx.cooldown_active:
             return self.ctx.cooldown_manager.get_state().user_message
+
+        # /do task <id> — manual autonomous task execution
+        parts = args.strip().split()
+        if (
+            len(parts) >= 2
+            and parts[0].lower() == "task"
+            and parts[1].isdigit()
+        ):
+            return await self._do_manual_task(sender, int(parts[1]))
+
         current_project = self.ctx.project_manager.get_current_project(sender)
         if not current_project:
             return "No project selected. Use /select <project> first."
@@ -492,6 +504,61 @@ class CoreCommandHandler(BaseCommandHandler):
         self.ctx.task_manager.start_background_task(
             sender, args, current_project,
             image_paths=image_paths,
+        )
+        return None
+
+    async def _do_manual_task(
+        self, sender: str, task_id: int,
+    ) -> Optional[str]:
+        """Execute an autonomous task manually via /do task <id>."""
+        if not self.ctx.autonomous_manager:
+            return "Autonomous system not available."
+
+        error, context = await self.ctx.autonomous_manager.prepare_manual_task(
+            task_id
+        )
+        if error:
+            return error
+
+        # Use the task's project (may differ from user's current selection)
+        project_name = context["project_name"]
+        busy = self.ctx.task_manager.check_busy(sender, project_name)
+        if busy:
+            # Revert task to QUEUED since we claimed it
+            await self.ctx.autonomous_manager.db.update_task_status(
+                task_id, TaskStatus.QUEUED,
+            )
+            return busy
+
+        # Build prompt with task context
+        prompt = (
+            f"Execute this task:\n\n"
+            f"Task: {context['title']}\n"
+            f"Description: {context['description']}\n"
+        )
+        if context["story_title"]:
+            prompt += f"\nStory: {context['story_title']}"
+        if context["prd_title"]:
+            prompt += f"\nPRD: {context['prd_title']}"
+
+        # Show warnings about unmet dependencies
+        warnings_msg = ""
+        if context["warnings"]:
+            warnings_msg = (
+                "\nWarning — unmet dependencies:\n"
+                + "\n".join(f"  - {w}" for w in context["warnings"])
+                + "\nProceeding anyway (manual override).\n"
+            )
+
+        await self.ctx.send_typing_indicator(sender, True)
+        await self.ctx.send_message(
+            sender,
+            f"Executing task #{task_id}: {context['title'][:60]}..."
+            f"{warnings_msg}",
+        )
+        self.ctx.task_manager.start_background_task(
+            sender, prompt, project_name,
+            manual_task_id=task_id,
         )
         return None
 

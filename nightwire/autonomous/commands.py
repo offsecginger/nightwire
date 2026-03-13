@@ -21,6 +21,7 @@ class AutonomousCommands:
         manager: AutonomousManager,
         get_current_project: callable,
         is_prd_creating: callable = lambda phone: False,
+        create_prd_fn: callable = None,
     ):
         """
         Initialize command handlers.
@@ -30,19 +31,24 @@ class AutonomousCommands:
             get_current_project: Callable(phone_number) -> (project_name, project_path)
             is_prd_creating: Callable(phone_number) -> bool, checks if a PRD is
                 currently being generated for this sender.
+            create_prd_fn: Callable(sender, description, auto_queue) -> str,
+                creates a PRD from a description (for /prd ingest).
         """
         self.manager = manager
         self.get_current_project = get_current_project
         self.is_prd_creating = is_prd_creating
+        self.create_prd_fn = create_prd_fn
 
     # ========== /prd Command ==========
 
     async def handle_prd(self, phone: str, args: str) -> str:
-        """Create, list, view, activate, or archive Product Requirements Documents.
+        """Create, list, view, activate, ingest, or archive PRDs.
 
         Signal usage::
 
             /prd Build a REST API           — Create a new PRD
+            /prd ingest                     — Analyze CLAUDE.md and create PRD
+            /prd ingest src/main.py         — Analyze a specific file and create PRD
             /prd list                       — List all PRDs
             /prd 3                          — Show PRD #3 details
             /prd activate 3                 — Activate PRD #3
@@ -62,7 +68,9 @@ class AutonomousCommands:
         subcommand = parts[0].lower()
         subargs = parts[1] if len(parts) > 1 else ""
 
-        if subcommand == "list":
+        if subcommand == "ingest":
+            return await self._ingest_prd(phone, subargs)
+        elif subcommand == "list":
             return await self._list_prds(phone)
         elif subcommand == "activate":
             return await self._activate_prd(phone, subargs)
@@ -94,6 +102,39 @@ class AutonomousCommands:
             f"Example:\n"
             f"/story {prd.id} User registration | Users can register with email"
         )
+
+    async def _ingest_prd(self, phone: str, args: str) -> str:
+        """Analyze a project file and create a PRD from it.
+
+        Reads the specified file (default: CLAUDE.md) and all
+        referenced files, then creates a PRD with stories and tasks.
+        Does NOT auto-queue — user must /queue prd <id> to start.
+        """
+        if not self.create_prd_fn:
+            return "PRD ingestion is not configured."
+
+        # Default to CLAUDE.md if no file specified
+        entry_file = args.strip() if args.strip() else "CLAUDE.md"
+
+        prompt = (
+            f"Read and analyze the file '{entry_file}' in this project. "
+            f"Follow all references it makes to other files "
+            f"(subagents, rules, configs, source code, etc.) to "
+            f"understand the full project structure, architecture, "
+            f"and current state.\n\n"
+            f"Based on your analysis, create a comprehensive PRD "
+            f"that breaks the project's remaining work or improvements "
+            f"into stories and tasks. Focus on actionable work items "
+            f"that would move the project forward."
+        )
+
+        try:
+            return await self.create_prd_fn(
+                phone, prompt, auto_queue=False,
+            )
+        except Exception as e:
+            logger.error("prd_ingest_error", error=str(e))
+            return f"PRD ingestion failed: {str(e)[:200]}"
 
     async def _list_prds(self, phone: str) -> str:
         """List PRDs for user."""
@@ -183,13 +224,16 @@ class AutonomousCommands:
     def _prd_help(self) -> str:
         return """PRD Commands:
 /prd <title> - Create new PRD
+/prd ingest [file] - Analyze project file and create PRD (default: CLAUDE.md)
 /prd list - List all PRDs
 /prd <id> - Show PRD details
 /prd activate <id> - Activate for processing
 /prd archive <id> - Archive a PRD
 
-Example:
-/prd User Authentication System"""
+Examples:
+/prd User Authentication System
+/prd ingest
+/prd ingest CLAUDE.md"""
 
     # ========== /story Command ==========
 
@@ -441,29 +485,45 @@ Example:
     # ========== /tasks Command ==========
 
     async def handle_tasks(self, phone: str, args: str) -> str:
-        """List tasks grouped by status, with optional status filter.
+        """List tasks grouped by status, with optional status filter or purge.
 
         Signal usage::
 
             /tasks                          — List all tasks
             /tasks queued                   — Show only queued tasks
             /tasks completed                — Show only completed tasks
+            /tasks purge                    — Cancel all pending/queued/blocked tasks
 
         Args:
             phone: Phone number or UUID of the sender.
-            args: Optional status filter (pending, queued, in_progress, etc.).
+            args: Optional status filter, or ``purge`` to cancel non-terminal tasks.
 
         Returns:
             Formatted task list grouped by status with summary stats.
         """
         project_name, _ = self.get_current_project(phone)
 
+        if args.strip().lower() == "purge":
+            count = await self.manager.purge_non_terminal_tasks(
+                phone, project_name
+            )
+            if count == 0:
+                return "No pending/queued/blocked tasks to purge."
+            return (
+                f"Purged {count} task(s) "
+                "(pending/queued/blocked → cancelled)."
+            )
+
         status_filter = None
         if args.strip():
             try:
                 status_filter = TaskStatus(args.strip().lower())
             except ValueError:
-                return f"Invalid status. Use: {', '.join(s.value for s in TaskStatus)}"
+                return (
+                    f"Invalid status. Use: "
+                    f"{', '.join(s.value for s in TaskStatus)}"
+                    f", or 'purge'"
+                )
 
         tasks = await self.manager.list_tasks(
             phone_number=phone,
@@ -741,9 +801,12 @@ def get_autonomous_help_metadata():
 
     return {
         "prd": HelpMetadata(
-            description="Create or view Product Requirements Documents",
-            usage="/prd <title> | /prd list | /prd <id>",
-            examples=["/prd Add OAuth2 login", "/prd list", "/prd 5"],
+            description="Create, ingest from project files, or view PRDs",
+            usage="/prd <title> | /prd ingest [file] | /prd list | /prd <id>",
+            examples=[
+                "/prd Add OAuth2 login", "/prd list",
+                "/prd 5", "/prd ingest", "/prd ingest CLAUDE.md",
+            ],
         ),
         "story": HelpMetadata(
             description="Add a user story to a PRD",
@@ -756,9 +819,12 @@ def get_autonomous_help_metadata():
             examples=["/task 12 Add callback endpoint | Create GET /auth/callback"],
         ),
         "tasks": HelpMetadata(
-            description="List tasks, optionally filtered by status",
-            usage="/tasks [status]",
-            examples=["/tasks", "/tasks running", "/tasks completed"],
+            description="List tasks, filter by status, or purge queue",
+            usage="/tasks [status | purge]",
+            examples=[
+                "/tasks", "/tasks queued",
+                "/tasks completed", "/tasks purge",
+            ],
         ),
         "queue": HelpMetadata(
             description="Queue tasks for autonomous execution",

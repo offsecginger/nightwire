@@ -277,6 +277,7 @@ class SignalBot:
                 self.project_manager.get_current_path(phone),
             ),
             is_prd_creating=_is_prd_creating,
+            create_prd_fn=self.task_manager.create_autonomous_prd,
         )
 
         # Start plugins

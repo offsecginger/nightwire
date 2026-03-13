@@ -192,6 +192,7 @@ class TaskManager:
         project_name: Optional[str],
         image_paths: Optional[List[Path]] = None,
         source: str = "do",
+        manual_task_id: Optional[int] = None,
     ) -> None:
         """Start a Claude task in the background (non-blocking).
 
@@ -203,6 +204,8 @@ class TaskManager:
                 When provided, file paths are appended to the prompt
                 so Claude's agentic Read tool can view the images.
             source: Usage source label (do, ask, summary, complex).
+            manual_task_id: If set, marks this autonomous task as
+                COMPLETED/FAILED on success/failure via the manager.
         """
         # Build effective description with image paths appended
         effective_description = task_description
@@ -303,9 +306,21 @@ class TaskManager:
                 t.add_done_callback(log_task_exception)
 
                 if success:
-                    await self._send_message(sender, "[Task complete]")
+                    if manual_task_id and self.autonomous_manager:
+                        result = await self.autonomous_manager.complete_manual_task(
+                            manual_task_id, True, output=response,
+                        )
+                        await self._send_message(sender, result)
+                    else:
+                        await self._send_message(sender, "[Task complete]")
                 else:
-                    await self._send_message(sender, response)
+                    if manual_task_id and self.autonomous_manager:
+                        result = await self.autonomous_manager.complete_manual_task(
+                            manual_task_id, False, error=response[:500],
+                        )
+                        await self._send_message(sender, result)
+                    else:
+                        await self._send_message(sender, response)
 
             except asyncio.CancelledError:
                 reason = task_state.get("cancel_reason", "user cancel")
@@ -321,6 +336,15 @@ class TaskManager:
                     f"Task was: {task_description[:100]}"
                 )
                 await self._send_message(sender, msg)
+                # Revert manual task to QUEUED on cancel (not FAILED)
+                if manual_task_id and self.autonomous_manager:
+                    try:
+                        from .autonomous.models import TaskStatus
+                        await self.autonomous_manager.db.update_task_status(
+                            manual_task_id, TaskStatus.QUEUED,
+                        )
+                    except Exception:
+                        pass
                 logger.info(
                     "background_task_cancelled",
                     task=task_description[:50],
@@ -331,6 +355,13 @@ class TaskManager:
                     "background_task_error", error=str(e), exc_type=type(e).__name__
                 )
                 await self._send_message(sender, "Task failed due to an internal error.")
+                if manual_task_id and self.autonomous_manager:
+                    try:
+                        await self.autonomous_manager.complete_manual_task(
+                            manual_task_id, False, error=str(e)[:500],
+                        )
+                    except Exception:
+                        pass
             finally:
                 await self._send_typing_indicator(sender, False)
                 self._sender_tasks.pop((sender, project_name or ""), None)
@@ -502,7 +533,8 @@ class TaskManager:
         logger.info("prd_creation_started", task=task_description[:50], sender=sender)
 
     async def create_autonomous_prd(
-        self, sender: str, task_description: str
+        self, sender: str, task_description: str,
+        auto_queue: bool = True,
     ) -> str:
         """Create a PRD with stories and tasks via Claude.
 
@@ -512,6 +544,8 @@ class TaskManager:
         Args:
             sender: Phone number of the requesting user.
             task_description: High-level feature description.
+            auto_queue: If True (default), queue tasks and start loop.
+                If False, create PRD/stories/tasks but do not queue.
 
         Returns:
             User-facing summary of the created PRD.
@@ -606,6 +640,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 await update_step("Creating PRD structure...", notify=False)
                 return await self._create_prd_from_breakdown(
                     sender, project_name, result, update_step,
+                    auto_queue=auto_queue,
                 )
 
             # Fallback: text mode + parse_prd_json
@@ -641,6 +676,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
             await update_step("Creating PRD structure...", notify=False)
             return await self._create_prd_from_dict(
                 sender, project_name, breakdown, update_step,
+                auto_queue=auto_queue,
             )
 
         except (json.JSONDecodeError, ValueError) as e:
@@ -659,6 +695,7 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
 
     async def _create_prd_from_breakdown(
         self, sender, project_name, breakdown, update_step,
+        auto_queue: bool = True,
     ) -> str:
         """Create PRD/stories/tasks from a typed PRDBreakdown model."""
         prd = await self.autonomous_manager.create_prd(
@@ -723,12 +760,15 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 f"  - {story.title} ({len(story_bd.tasks)} tasks)"
             )
 
-        return await self._finalize_prd(
-            prd, total_tasks, story_summaries, update_step,
-        )
+        if auto_queue:
+            return await self._finalize_prd(
+                prd, total_tasks, story_summaries, update_step,
+            )
+        return self._prd_summary_no_queue(prd, total_tasks, story_summaries)
 
     async def _create_prd_from_dict(
         self, sender, project_name, breakdown, update_step,
+        auto_queue: bool = True,
     ) -> str:
         """Create PRD/stories/tasks from a parsed dict (fallback path)."""
         prd = await self.autonomous_manager.create_prd(
@@ -792,8 +832,19 @@ Return ONLY valid JSON, no markdown code blocks, no explanation."""
                 f"  - {story.title} ({task_count} tasks)"
             )
 
-        return await self._finalize_prd(
-            prd, total_tasks, story_summaries, update_step,
+        if auto_queue:
+            return await self._finalize_prd(
+                prd, total_tasks, story_summaries, update_step,
+            )
+        return self._prd_summary_no_queue(prd, total_tasks, story_summaries)
+
+    def _prd_summary_no_queue(self, prd, total_tasks, story_summaries) -> str:
+        """Return a summary without queuing tasks (for /prd ingest)."""
+        return (
+            f"PRD #{prd.id}: {prd.title}\n\n"
+            f"Stories:\n" + "\n".join(story_summaries) + "\n\n"
+            f"{total_tasks} tasks created (not queued)\n"
+            f"Use /queue prd {prd.id} to start execution."
         )
 
     async def _finalize_prd(
