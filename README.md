@@ -203,11 +203,18 @@ The autonomous system handles complex, multi-step development tasks. It breaks w
 | Command | Description |
 |---------|-------------|
 | `/prd <title>` | Create a new Product Requirements Document |
+| `/prd ingest [file]` | Analyze a project file (default: CLAUDE.md) and create a PRD |
 | `/prd list` | List all PRDs |
 | `/prd <id>` | View PRD details with stories and task status |
+| `/prd delete <id>` | Delete a PRD and all its stories/tasks |
 | `/story <prd_id> <title> \| <description>` | Add a user story to a PRD |
+| `/story delete <id>` | Delete a story and all its tasks |
 | `/task <story_id> <title> \| <description>` | Add an individual task to a story |
 | `/tasks [status]` | List tasks, optionally filtered by status (queued, running, completed, failed) |
+| `/tasks purge` | Cancel all pending/queued/blocked tasks |
+| `/tasks purge failed` | Cancel all failed tasks |
+| `/tasks purge all` | Cancel all non-terminal tasks (queued + failed) |
+| `/do task <id>` | Manually execute an autonomous task via the /do runner |
 | `/queue story\|prd <id>` | Queue all tasks from a story or entire PRD for execution |
 | `/autonomous start` | Start the autonomous task execution loop |
 | `/autonomous pause` | Pause execution (current task finishes, no new ones start) |

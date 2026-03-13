@@ -1088,6 +1088,129 @@ class AutonomousDatabase:
             )
             self._conn.commit()
 
+    async def delete_prd(self, prd_id: int) -> Optional[dict]:
+        """Delete a PRD and all its stories and tasks.
+
+        Uses explicit multi-table DELETE (no CASCADE reliance since
+        PRAGMA foreign_keys is not enabled). Refuses if any task
+        under this PRD is currently IN_PROGRESS.
+
+        Args:
+            prd_id: Database ID of the PRD to delete.
+
+        Returns:
+            Dict with counts {tasks, stories, prd_title} on success,
+            None if PRD not found, or raises ValueError if tasks
+            are in progress.
+        """
+        return await asyncio.to_thread(self._delete_prd_sync, prd_id)
+
+    def _delete_prd_sync(self, prd_id: int) -> Optional[dict]:
+        with self._lock:
+            cursor = self._conn.cursor()
+
+            # Verify PRD exists
+            cursor.execute("SELECT title FROM prds WHERE id = ?", (prd_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            prd_title = row[0]
+
+            # Safety guard: refuse if any task is IN_PROGRESS
+            cursor.execute(
+                """SELECT COUNT(*) FROM tasks
+                   WHERE story_id IN (SELECT id FROM stories WHERE prd_id = ?)
+                   AND status = ?""",
+                (prd_id, TaskStatus.IN_PROGRESS.value),
+            )
+            if cursor.fetchone()[0] > 0:
+                raise ValueError(
+                    f"PRD #{prd_id} has tasks in progress. "
+                    "Stop or wait for them before deleting."
+                )
+
+            # Explicit cascade: tasks -> stories -> prd
+            cursor.execute(
+                "DELETE FROM tasks WHERE story_id IN "
+                "(SELECT id FROM stories WHERE prd_id = ?)",
+                (prd_id,),
+            )
+            tasks_deleted = cursor.rowcount
+
+            cursor.execute(
+                "DELETE FROM stories WHERE prd_id = ?", (prd_id,)
+            )
+            stories_deleted = cursor.rowcount
+
+            cursor.execute("DELETE FROM prds WHERE id = ?", (prd_id,))
+            self._conn.commit()
+
+            return {
+                "tasks": tasks_deleted,
+                "stories": stories_deleted,
+                "prd_title": prd_title,
+            }
+
+    async def delete_story(self, story_id: int) -> Optional[dict]:
+        """Delete a story and all its tasks.
+
+        Uses explicit multi-table DELETE. Refuses if any task under
+        this story is currently IN_PROGRESS.
+
+        Args:
+            story_id: Database ID of the story to delete.
+
+        Returns:
+            Dict with counts {tasks, story_title, prd_id} on success,
+            None if story not found, or raises ValueError if tasks
+            are in progress.
+        """
+        return await asyncio.to_thread(self._delete_story_sync, story_id)
+
+    def _delete_story_sync(self, story_id: int) -> Optional[dict]:
+        with self._lock:
+            cursor = self._conn.cursor()
+
+            # Verify story exists
+            cursor.execute(
+                "SELECT title, prd_id FROM stories WHERE id = ?",
+                (story_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            story_title, prd_id = row[0], row[1]
+
+            # Safety guard: refuse if any task is IN_PROGRESS
+            cursor.execute(
+                "SELECT COUNT(*) FROM tasks WHERE story_id = ? AND status = ?",
+                (story_id, TaskStatus.IN_PROGRESS.value),
+            )
+            if cursor.fetchone()[0] > 0:
+                raise ValueError(
+                    f"Story #{story_id} has tasks in progress. "
+                    "Stop or wait for them before deleting."
+                )
+
+            # Explicit cascade: tasks -> story
+            cursor.execute(
+                "DELETE FROM tasks WHERE story_id = ?", (story_id,)
+            )
+            tasks_deleted = cursor.rowcount
+
+            cursor.execute(
+                "DELETE FROM stories WHERE id = ?", (story_id,)
+            )
+            self._conn.commit()
+
+            return {
+                "tasks": tasks_deleted,
+                "story_title": story_title,
+                "prd_id": prd_id,
+            }
+
     async def purge_non_terminal_tasks(
         self, phone_number: str, project_name: Optional[str] = None
     ) -> int:
@@ -1123,6 +1246,47 @@ class AutonomousDatabase:
                 TaskStatus.PENDING.value,
                 TaskStatus.QUEUED.value,
                 TaskStatus.BLOCKED.value,
+            ]
+            if project_name:
+                sql += " AND project_name = ?"
+                params.append(project_name)
+            cursor.execute(sql, params)
+            self._conn.commit()
+            return cursor.rowcount
+
+    async def purge_failed_tasks(
+        self, phone_number: str, project_name: Optional[str] = None
+    ) -> int:
+        """Mark all FAILED tasks as CANCELLED.
+
+        Args:
+            phone_number: Owner's phone number or UUID.
+            project_name: Optional project filter.
+
+        Returns:
+            Number of failed tasks purged.
+        """
+        return await asyncio.to_thread(
+            self._purge_failed_tasks_sync,
+            phone_number,
+            project_name,
+        )
+
+    def _purge_failed_tasks_sync(
+        self, phone_number: str, project_name: Optional[str] = None
+    ) -> int:
+        with self._lock:
+            cursor = self._conn.cursor()
+            sql = """
+                UPDATE tasks SET status = ?, error_message = ?
+                WHERE phone_number = ?
+                AND status = ?
+            """
+            params: list = [
+                TaskStatus.CANCELLED.value,
+                "Purged via /tasks purge failed",
+                phone_number,
+                TaskStatus.FAILED.value,
             ]
             if project_name:
                 sql += " AND project_name = ?"

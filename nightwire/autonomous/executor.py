@@ -451,7 +451,7 @@ class TaskExecutor:
                 )
 
             # Parse files changed from output
-            files_changed = await self._get_files_changed(project_path)
+            files_changed = await self._get_files_changed(project_path, base_ref=base_ref)
 
             await report_step(f"Implementation complete, files changed: {len(files_changed)}")
 
@@ -719,7 +719,7 @@ class TaskExecutor:
 
         current_result = verification_result
         current_output = original_output
-        current_files = await self._get_files_changed(project_path)
+        current_files = await self._get_files_changed(project_path, base_ref=base_ref)
         fix_usage: list = []
 
         for attempt in range(MAX_VERIFICATION_FIX_ATTEMPTS):
@@ -759,7 +759,7 @@ class TaskExecutor:
                 break
 
             current_output = fix_output
-            current_files = await self._get_files_changed(project_path)
+            current_files = await self._get_files_changed(project_path, base_ref=base_ref)
 
             # Re-verify (invalidate cache so we get a fresh result)
             await report_step("Re-verifying after fix...")
@@ -960,11 +960,20 @@ class TaskExecutor:
 
         return "\n\n---\n\n".join(parts)
 
-    async def _get_files_changed(self, project_path: Path) -> List[str]:
+    async def _get_files_changed(
+        self, project_path: Path, base_ref: Optional[str] = None
+    ) -> List[str]:
         """Get files changed by the task using git (source of truth).
 
         Checks uncommitted changes (tracked + untracked), then falls
-        back to the last commit diff (task may already be committed).
+        back to comparing against base_ref (the checkpoint commit hash
+        captured before Claude runs) or HEAD~1 if no base_ref.
+
+        Args:
+            project_path: Path to the project git repository.
+            base_ref: Optional commit hash captured before task execution.
+                When provided, used as the comparison base for committed
+                changes (handles Claude CLI making multiple commits).
         """
         files = set()
         active_proc = None
@@ -1015,10 +1024,14 @@ class TaskExecutor:
                     if line.strip():
                         files.add(line.strip())
 
-                # Also check last commit if no uncommitted changes
+                # Also check committed changes if no uncommitted changes.
+                # Use base_ref (checkpoint hash) when available to catch
+                # all commits Claude made (it often makes multiple commits).
+                # Fall back to HEAD~1 if no base_ref provided.
                 if not files:
+                    compare_ref = base_ref if base_ref else "HEAD~1"
                     proc = await asyncio.create_subprocess_exec(
-                        "git", "diff", "--name-only", "HEAD~1", "HEAD",
+                        "git", "diff", "--name-only", compare_ref, "HEAD",
                         cwd=str(project_path),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,

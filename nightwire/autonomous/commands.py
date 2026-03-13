@@ -42,7 +42,7 @@ class AutonomousCommands:
     # ========== /prd Command ==========
 
     async def handle_prd(self, phone: str, args: str) -> str:
-        """Create, list, view, activate, ingest, or archive PRDs.
+        """Create, list, view, activate, ingest, delete, or archive PRDs.
 
         Signal usage::
 
@@ -53,6 +53,7 @@ class AutonomousCommands:
             /prd 3                          — Show PRD #3 details
             /prd activate 3                 — Activate PRD #3
             /prd archive 3                  — Archive PRD #3
+            /prd delete 3                   — Delete PRD #3 + all stories/tasks
 
         Args:
             phone: Phone number or UUID of the sender.
@@ -76,6 +77,8 @@ class AutonomousCommands:
             return await self._activate_prd(phone, subargs)
         elif subcommand == "archive":
             return await self._archive_prd(phone, subargs)
+        elif subcommand == "delete":
+            return await self._delete_prd(phone, subargs)
         elif subcommand.isdigit():
             return await self._show_prd(phone, int(subcommand))
         else:
@@ -110,6 +113,10 @@ class AutonomousCommands:
         referenced files, then creates a PRD with stories and tasks.
         Does NOT auto-queue — user must /queue prd <id> to start.
         """
+        project_name, _ = self.get_current_project(phone)
+        if not project_name:
+            return "No project selected. Use /select <project> first."
+
         if not self.create_prd_fn:
             return "PRD ingestion is not configured."
 
@@ -221,6 +228,26 @@ class AutonomousCommands:
         await self.manager.archive_prd(prd_id)
         return f"PRD #{prd_id} archived: {prd.title}"
 
+    async def _delete_prd(self, phone: str, args: str) -> str:
+        """Delete a PRD and all its stories and tasks."""
+        if not args.strip().isdigit():
+            return "Usage: /prd delete <prd_id>"
+
+        prd_id = int(args.strip())
+        try:
+            result = await self.manager.delete_prd(prd_id)
+        except ValueError as e:
+            return str(e)
+
+        if result is None:
+            return f"PRD #{prd_id} not found."
+
+        return (
+            f"Deleted PRD #{prd_id}: {result['prd_title']}\n"
+            f"Removed {result['stories']} story(ies) "
+            f"and {result['tasks']} task(s)."
+        )
+
     def _prd_help(self) -> str:
         return """PRD Commands:
 /prd <title> - Create new PRD
@@ -229,16 +256,18 @@ class AutonomousCommands:
 /prd <id> - Show PRD details
 /prd activate <id> - Activate for processing
 /prd archive <id> - Archive a PRD
+/prd delete <id> - Delete PRD and all stories/tasks
 
 Examples:
 /prd User Authentication System
 /prd ingest
-/prd ingest CLAUDE.md"""
+/prd ingest CLAUDE.md
+/prd delete 3"""
 
     # ========== /story Command ==========
 
     async def handle_story(self, phone: str, args: str) -> str:
-        """Create, list, or view user stories within a PRD.
+        """Create, list, view, or delete user stories within a PRD.
 
         Signal usage::
 
@@ -246,6 +275,7 @@ Examples:
             /story list                     — List all stories
             /story list 1                   — List stories for PRD #1
             /story 5                        — Show story #5 details
+            /story delete 5                 — Delete story #5 + all its tasks
 
         Args:
             phone: Phone number or UUID of the sender.
@@ -263,6 +293,8 @@ Examples:
 
         if subcommand == "list":
             return await self._list_stories(phone, subargs)
+        elif subcommand == "delete":
+            return await self._delete_story(phone, subargs)
         elif subcommand.isdigit():
             if not subargs:
                 # No args after number: show story details (/story <id>)
@@ -369,14 +401,36 @@ Examples:
 
         return "\n".join(lines)
 
+    async def _delete_story(self, phone: str, args: str) -> str:
+        """Delete a story and all its tasks."""
+        if not args.strip().isdigit():
+            return "Usage: /story delete <story_id>"
+
+        story_id = int(args.strip())
+        try:
+            result = await self.manager.delete_story(story_id)
+        except ValueError as e:
+            return str(e)
+
+        if result is None:
+            return f"Story #{story_id} not found."
+
+        return (
+            f"Deleted Story #{story_id}: {result['story_title']}\n"
+            f"Removed {result['tasks']} task(s) "
+            f"(was in PRD #{result['prd_id']})."
+        )
+
     def _story_help(self) -> str:
         return """Story Commands:
 /story <prd_id> <title> | <description> - Create story
 /story list [prd_id] - List stories
 /story <id> - Show story details
+/story delete <id> - Delete story and all its tasks
 
 Example:
-/story 1 User login | Users can log in with email and password"""
+/story 1 User login | Users can log in with email and password
+/story delete 5"""
 
     # ========== /task Command ==========
 
@@ -503,16 +557,41 @@ Example:
         """
         project_name, _ = self.get_current_project(phone)
 
-        if args.strip().lower() == "purge":
-            count = await self.manager.purge_non_terminal_tasks(
-                phone, project_name
-            )
-            if count == 0:
-                return "No pending/queued/blocked tasks to purge."
-            return (
-                f"Purged {count} task(s) "
-                "(pending/queued/blocked → cancelled)."
-            )
+        if args.strip().lower().startswith("purge"):
+            purge_parts = args.strip().lower().split()
+            purge_scope = purge_parts[1] if len(purge_parts) > 1 else ""
+
+            if purge_scope == "failed":
+                count = await self.manager.purge_failed_tasks(
+                    phone, project_name
+                )
+                if count == 0:
+                    return "No failed tasks to purge."
+                return f"Purged {count} failed task(s)."
+            elif purge_scope == "all":
+                count_queue = await self.manager.purge_non_terminal_tasks(
+                    phone, project_name
+                )
+                count_failed = await self.manager.purge_failed_tasks(
+                    phone, project_name
+                )
+                total = count_queue + count_failed
+                if total == 0:
+                    return "No tasks to purge."
+                return (
+                    f"Purged {total} task(s) "
+                    f"({count_queue} queued, {count_failed} failed)."
+                )
+            else:
+                count = await self.manager.purge_non_terminal_tasks(
+                    phone, project_name
+                )
+                if count == 0:
+                    return "No pending/queued/blocked tasks to purge."
+                return (
+                    f"Purged {count} task(s) "
+                    "(pending/queued/blocked → cancelled)."
+                )
 
         status_filter = None
         if args.strip():
@@ -801,17 +880,21 @@ def get_autonomous_help_metadata():
 
     return {
         "prd": HelpMetadata(
-            description="Create, ingest from project files, or view PRDs",
-            usage="/prd <title> | /prd ingest [file] | /prd list | /prd <id>",
+            description="Create, ingest, view, or delete PRDs",
+            usage="/prd <title> | /prd ingest [file] | /prd list | /prd <id> | /prd delete <id>",
             examples=[
                 "/prd Add OAuth2 login", "/prd list",
                 "/prd 5", "/prd ingest", "/prd ingest CLAUDE.md",
+                "/prd delete 3",
             ],
         ),
         "story": HelpMetadata(
-            description="Add a user story to a PRD",
-            usage="/story <prd_id> <title> | <description>",
-            examples=["/story 5 Google OAuth | Implement Google OAuth2 flow"],
+            description="Add, view, or delete user stories in a PRD",
+            usage="/story <prd_id> <title> | <description> | /story delete <id>",
+            examples=[
+                "/story 5 Google OAuth | Implement Google OAuth2 flow",
+                "/story delete 5",
+            ],
         ),
         "task": HelpMetadata(
             description="Add a task to a story",
@@ -820,10 +903,11 @@ def get_autonomous_help_metadata():
         ),
         "tasks": HelpMetadata(
             description="List tasks, filter by status, or purge queue",
-            usage="/tasks [status | purge]",
+            usage="/tasks [status | purge | purge failed | purge all]",
             examples=[
                 "/tasks", "/tasks queued",
                 "/tasks completed", "/tasks purge",
+                "/tasks purge failed", "/tasks purge all",
             ],
         ),
         "queue": HelpMetadata(

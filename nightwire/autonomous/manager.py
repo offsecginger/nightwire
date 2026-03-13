@@ -132,6 +132,28 @@ class AutonomousManager:
         """
         return await self.loop.stop_worker(task_id)
 
+    async def delete_prd(self, prd_id: int) -> Optional[dict]:
+        """Delete a PRD and all its stories and tasks.
+
+        Returns:
+            Dict with counts on success, None if not found.
+
+        Raises:
+            ValueError: If any task is IN_PROGRESS.
+        """
+        return await self.db.delete_prd(prd_id)
+
+    async def delete_story(self, story_id: int) -> Optional[dict]:
+        """Delete a story and all its tasks.
+
+        Returns:
+            Dict with counts on success, None if not found.
+
+        Raises:
+            ValueError: If any task is IN_PROGRESS.
+        """
+        return await self.db.delete_story(story_id)
+
     async def purge_non_terminal_tasks(
         self, phone_number: str, project_name: Optional[str] = None
     ) -> int:
@@ -145,6 +167,22 @@ class AutonomousManager:
             Number of tasks purged.
         """
         return await self.db.purge_non_terminal_tasks(
+            phone_number, project_name
+        )
+
+    async def purge_failed_tasks(
+        self, phone_number: str, project_name: Optional[str] = None
+    ) -> int:
+        """Mark all FAILED tasks as CANCELLED.
+
+        Args:
+            phone_number: Owner's phone number or UUID.
+            project_name: Optional project filter.
+
+        Returns:
+            Number of failed tasks purged.
+        """
+        return await self.db.purge_failed_tasks(
             phone_number, project_name
         )
 

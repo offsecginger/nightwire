@@ -5,6 +5,18 @@ All notable changes to nightwire (formerly sidechannel) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.6] - 2026-03-13
+
+### Fixed — Production Deployment Issues (v3.0.5 Observations)
+
+- `autonomous/commands.py`: `/prd ingest` now checks for project selection before proceeding. Previously failed silently deep in the call chain when no project was selected.
+- `autonomous/executor.py`: Fixed `files changed: 0` false positive in autonomous task execution. `_get_files_changed()` now accepts a `base_ref` parameter (the checkpoint commit hash captured before Claude runs) and compares against it instead of only `HEAD~1`. This correctly detects files when Claude Code CLI makes multiple commits during execution. Threaded through all 3 call sites (execute_task + 2 in verification fix loop).
+
+### Added
+
+- **Three-tier task purge**: `/tasks purge` (unchanged — PENDING/QUEUED/BLOCKED), `/tasks purge failed` (FAILED only), `/tasks purge all` (both queued and failed). Previous `/tasks purge` behavior is fully preserved.
+- **Delete PRDs and stories**: `/prd delete <id>` removes a PRD and all its stories and tasks. `/story delete <id>` removes a story and all its tasks. Both use explicit multi-table DELETE (no CASCADE reliance) with IN_PROGRESS safety guard — refuses to delete if any task is currently executing. Response includes count of deleted entities.
+
 ## [3.0.5] - 2026-03-13
 
 ### Fixed — Production Deployment Issues (v3.0.4 Observations)
