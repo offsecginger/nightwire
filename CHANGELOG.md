@@ -5,6 +5,14 @@ All notable changes to nightwire (formerly sidechannel) will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.7] - 2026-03-13
+
+### Fixed — Production Deployment Issues (v3.0.6 Observations)
+
+- `autonomous/executor.py`: Tasks completed by sibling parallel workers no longer fail with "files changed: 0". When Claude's output contains phrases like "already implemented", "already complete", or "nothing to do", the task is treated as a success (like PLANNING tasks) — learning extraction still runs. Module-level `_ALREADY_DONE_PATTERNS` constant (11 patterns) for easy extension.
+- `autonomous/commands.py`: `/tasks` stats line now shows total failed count when > 0: `Total: 14 (1 failed) | Today: 0 done, 0 failed`. Previously only showed today's failed count, confusing users who saw FAILED tasks listed above but "0 failed" in stats.
+- `autonomous/commands.py`: `/tasks purge` response now includes tip: "Tip: /tasks purge failed for failed tasks, /tasks purge all for everything." Improves discoverability of the three-tier purge system added in v3.0.6.
+
 ## [3.0.6] - 2026-03-13
 
 ### Fixed — Production Deployment Issues (v3.0.5 Observations)

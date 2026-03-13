@@ -590,7 +590,9 @@ Example:
                     return "No pending/queued/blocked tasks to purge."
                 return (
                     f"Purged {count} task(s) "
-                    "(pending/queued/blocked → cancelled)."
+                    "(pending/queued/blocked → cancelled).\n"
+                    "Tip: /tasks purge failed for failed tasks, "
+                    "/tasks purge all for everything."
                 )
 
         status_filter = None
@@ -636,8 +638,11 @@ Example:
                     lines.append(f"  ... and {len(by_status[status]) - 10} more")
 
         stats = await self.manager.get_task_stats(phone, project_name)
+        total_part = f"Total: {stats['total']}"
+        if stats.get("failed", 0) > 0:
+            total_part += f" ({stats['failed']} failed)"
         lines.append(
-            f"\nTotal: {stats['total']} | "
+            f"\n{total_part} | "
             f"Today: {stats['completed_today']} done, "
             f"{stats['failed_today']} failed"
         )

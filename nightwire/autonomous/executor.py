@@ -60,6 +60,17 @@ def _get_git_lock(project_path: str) -> asyncio.Lock:
 # Max attempts for verification fix loop
 MAX_VERIFICATION_FIX_ATTEMPTS = 2
 
+# Patterns indicating a task's work was already done by a sibling task.
+# When parallel tasks share a project, one may commit files that another
+# also targets. Claude correctly reports "already implemented" but
+# _get_files_changed() returns 0. These patterns detect that case.
+_ALREADY_DONE_PATTERNS = [
+    "already implemented", "already complete", "already exists",
+    "already in place", "already done", "no changes needed",
+    "nothing to change", "task already", "already fully",
+    "nothing to do", "no changes required",
+]
+
 # Keywords for auto-detecting task type from description
 _TASK_TYPE_KEYWORDS = {
     TaskType.BUG_FIX: [
@@ -454,6 +465,52 @@ class TaskExecutor:
             files_changed = await self._get_files_changed(project_path, base_ref=base_ref)
 
             await report_step(f"Implementation complete, files changed: {len(files_changed)}")
+
+            # Check if Claude reports work already done by a sibling task.
+            # In parallel execution, one task may commit files that another
+            # also targets. Claude correctly finds nothing to change.
+            if not files_changed and task_type != TaskType.PLANNING:
+                output_lower = output.lower()
+                if any(p in output_lower for p in _ALREADY_DONE_PATTERNS):
+                    logger.info(
+                        "task_already_complete",
+                        task_id=task.id,
+                        task_title=task.title,
+                    )
+                    await report_step(
+                        "Task already completed by sibling (no changes needed)"
+                    )
+                    result = TaskExecutionResult(
+                        task_id=task.id,
+                        success=True,
+                        claude_output=output,
+                        files_changed=[],
+                        execution_time_seconds=(
+                            (datetime.now() - start_time).total_seconds()
+                        ),
+                    )
+                    try:
+                        learnings = (
+                            await self.learning_extractor.extract_with_claude(
+                                task, result, runner,
+                            )
+                        )
+                        if runner.last_usage:
+                            usage_records.append(runner.last_usage.copy())
+                    except Exception as exc:
+                        logger.info(
+                            "structured_parse_fallback",
+                            component="learnings",
+                            error=str(exc)[:100],
+                        )
+                        learnings = (
+                            await self.learning_extractor.extract(
+                                task, result,
+                            )
+                        )
+                    result.usage_data = usage_records or None
+                    result.learnings_extracted = learnings
+                    return result
 
             # Short-circuit: if Claude claims success but created/modified
             # nothing, fail immediately — no point running expensive
